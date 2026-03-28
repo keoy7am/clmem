@@ -2,7 +2,7 @@ use super::Platform;
 use crate::models::{MemorySnapshot, MemoryUsage, ProcessInfo, ProcessState};
 use anyhow::Result;
 use chrono::Utc;
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+use sysinfo::{Pid, MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 pub struct WindowsPlatform {
     system: std::sync::Mutex<System>,
@@ -11,7 +11,9 @@ pub struct WindowsPlatform {
 impl WindowsPlatform {
     pub fn new() -> Self {
         let system = System::new_with_specifics(
-            RefreshKind::new().with_processes(ProcessRefreshKind::everything()),
+            RefreshKind::new()
+                .with_processes(ProcessRefreshKind::everything())
+                .with_memory(MemoryRefreshKind::everything()),
         );
         Self {
             system: std::sync::Mutex::new(system),
@@ -89,10 +91,11 @@ impl Platform for WindowsPlatform {
 
     fn take_snapshot(&self) -> Result<MemorySnapshot> {
         let processes = self.list_claude_processes()?;
-        let sys = self
+        let mut sys = self
             .system
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        sys.refresh_memory();
 
         let total_rss: u64 = processes.iter().map(|p| p.memory.rss_bytes).sum();
         let total_vms: u64 = processes.iter().map(|p| p.memory.vms_bytes).sum();
@@ -184,13 +187,13 @@ impl Platform for WindowsPlatform {
     }
 
     fn system_total_memory(&self) -> u64 {
-        let sys = self.system.lock().ok();
-        sys.map(|s| s.total_memory()).unwrap_or(0)
+        let mut sys = self.system.lock().ok();
+        sys.as_deref_mut().map(|s| { s.refresh_memory(); s.total_memory() }).unwrap_or(0)
     }
 
     fn system_available_memory(&self) -> u64 {
-        let sys = self.system.lock().ok();
-        sys.map(|s| s.available_memory()).unwrap_or(0)
+        let mut sys = self.system.lock().ok();
+        sys.as_deref_mut().map(|s| { s.refresh_memory(); s.available_memory() }).unwrap_or(0)
     }
 
     fn name(&self) -> &'static str {

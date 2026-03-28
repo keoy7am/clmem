@@ -77,7 +77,13 @@ impl Analyzer {
             }
         }
 
-        if data_points.len() < 2 {
+        if data_points.len() < 10 {
+            return None;
+        }
+
+        // Require at least 30 seconds of data to avoid false positives on startup
+        let time_span = data_points.last().unwrap().0 - data_points.first().unwrap().0;
+        if time_span < 30.0 {
             return None;
         }
 

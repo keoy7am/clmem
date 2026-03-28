@@ -31,6 +31,8 @@ pub fn send_request(path: &Path, msg: &IpcMessage) -> Result<IpcResponse> {
         use std::os::unix::net::UnixStream;
 
         let mut stream = UnixStream::connect(path)?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
         let len = (serialized.len() as u32).to_le_bytes();
         stream.write_all(&len)?;
         stream.write_all(&serialized)?;
@@ -39,6 +41,9 @@ pub fn send_request(path: &Path, msg: &IpcMessage) -> Result<IpcResponse> {
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf)?;
         let resp_len = u32::from_le_bytes(len_buf) as usize;
+        if resp_len > 16 * 1024 * 1024 {
+            anyhow::bail!("IPC response too large: {} bytes", resp_len);
+        }
         let mut resp_buf = vec![0u8; resp_len];
         stream.read_exact(&mut resp_buf)?;
         Ok(serde_json::from_slice(&resp_buf)?)
@@ -48,19 +53,35 @@ pub fn send_request(path: &Path, msg: &IpcMessage) -> Result<IpcResponse> {
     {
         use std::fs::OpenOptions;
         use std::io::{Read, Write};
+        use std::sync::mpsc;
+        use std::time::Duration;
 
-        let mut pipe = OpenOptions::new().read(true).write(true).open(path)?;
-        let len = (serialized.len() as u32).to_le_bytes();
-        pipe.write_all(&len)?;
-        pipe.write_all(&serialized)?;
-        pipe.flush()?;
+        let path = path.to_owned();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<IpcResponse> {
+                let mut pipe = OpenOptions::new().read(true).write(true).open(&path)?;
+                let len = (serialized.len() as u32).to_le_bytes();
+                pipe.write_all(&len)?;
+                pipe.write_all(&serialized)?;
+                pipe.flush()?;
 
-        let mut len_buf = [0u8; 4];
-        pipe.read_exact(&mut len_buf)?;
-        let resp_len = u32::from_le_bytes(len_buf) as usize;
-        let mut resp_buf = vec![0u8; resp_len];
-        pipe.read_exact(&mut resp_buf)?;
-        Ok(serde_json::from_slice(&resp_buf)?)
+                let mut len_buf = [0u8; 4];
+                pipe.read_exact(&mut len_buf)?;
+                let resp_len = u32::from_le_bytes(len_buf) as usize;
+                if resp_len > 16 * 1024 * 1024 {
+                    anyhow::bail!("IPC response too large: {} bytes", resp_len);
+                }
+                let mut resp_buf = vec![0u8; resp_len];
+                pipe.read_exact(&mut resp_buf)?;
+                Ok(serde_json::from_slice(&resp_buf)?)
+            })();
+            let _ = tx.send(result);
+        });
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(result) => result,
+            Err(_) => anyhow::bail!("IPC request timed out"),
+        }
     }
 }
 

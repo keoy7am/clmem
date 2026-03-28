@@ -1,0 +1,37 @@
+# clmem configuration
+# Copy to your config directory and rename to clmem.toml
+# Windows: %APPDATA%\clmem\clmem.toml
+# macOS:   ~/Library/Application Support/clmem/clmem.toml
+# Linux:   ~/.config/clmem/clmem.toml
+
+[daemon]
+scan_interval = "1s"          # Process scan interval
+analysis_interval = "10s"     # Trend analysis interval
+history_retention = "1h"      # Ring buffer retention
+log_level = "info"            # trace | debug | info | warn | error
+
+[thresholds]
+vms_leak_rate = "500MB/10min" # VMS growth rate alert threshold
+rss_max = "2GB"               # RSS upper bound alert
+orphan_timeout = "15min"      # STALE -> ORPHAN downgrade timeout
+idle_timeout = "5min"         # No activity -> IDLE threshold
+
+[cleanup]
+grace_period = "30s"          # Wait after main process exits
+strategy = "terminate_tree"   # terminate_tree | gentle | manual_only
+auto_cleanup_orphans = true   # Auto-clean ORPHAN processes
+confirm_before_kill = true    # Require confirmation in CLI mode
+
+[tui]
+refresh_rate = "500ms"        # Dashboard refresh rate
+chart_timespan = "30min"      # Trend chart time axis
+theme = "auto"                # auto | dark | light
+
+[windows]
+committed_memory_threshold = "512MB"
+scan_handles = true
+force_release_strategy = "terminate_tree"
+
+[notifications]
+enable = true
+method = "terminal"           # terminal | system | none

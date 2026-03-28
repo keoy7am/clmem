@@ -1,0 +1,41 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo
+Cargo.lock
+!Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Environment
+.env
+.env.*
+
+# User config (keep example only)
+clmem.toml
+
+# Logs
+*.log
+logs/
+
+# Test artifacts
+/coverage/
+*.profraw
+*.profdata
+
+# Distribution
+/dist/
+*.tar.gz
+*.zip

@@ -9,19 +9,20 @@ Claude Code CLI (Node.js-based) suffers from memory leaks, orphaned processes, a
 - **Real-time monitoring** — Track RSS, virtual memory, swap, and committed memory for all Claude Code processes
 - **Leak detection** — Identify abnormal memory growth patterns and alert before they become critical
 - **Orphan cleanup** — Detect and safely terminate processes that survive after Claude Code exits
-- **Windows committed memory** — Handle V8 engine memory retention, orphaned handles, and named pipe leaks
+- **Windows committed memory** — Handle V8 engine memory retention and orphaned named pipe handles
 - **TUI dashboard** — htop-style terminal interface with live charts and process management
 - **Diagnostic reports** — Export memory history and generate diagnostic reports for debugging
 
 ## Installation
 
 ```bash
-# From source
-cargo install --path .
-
-# Or build manually
+# Build from source (requires Rust toolchain)
 cargo build --release
-# Binary at target/release/clmem
+
+# Binary at target/release/clmem (or clmem.exe on Windows)
+
+# Or install directly
+cargo install --path .
 ```
 
 ## Quick Start
@@ -30,10 +31,10 @@ cargo build --release
 # One-shot status check (no daemon needed)
 clmem status
 
-# Start background monitoring
-clmem daemon start
+# Start background monitoring daemon
+clmem daemon
 
-# Open real-time dashboard
+# Open real-time TUI dashboard
 clmem tui
 
 # Clean up orphaned processes
@@ -41,114 +42,172 @@ clmem cleanup --dry-run    # Preview first
 clmem cleanup              # Execute cleanup
 ```
 
-## Usage
+## Commands
 
-### Daemon
+### `clmem status` — Quick Snapshot
+
+Works standalone, no daemon required. Scans the process table and shows all Claude Code processes.
 
 ```bash
-clmem daemon start         # Start background monitor
-clmem daemon stop          # Stop daemon
-clmem daemon status        # Check daemon status
+clmem status               # Human-readable table
+clmem status --json        # JSON output for scripting
 ```
 
-### TUI Dashboard
+### `clmem daemon` — Background Monitor
+
+Starts the monitoring daemon with continuous scanning, leak detection, and optional auto-cleanup.
 
 ```bash
-clmem tui                  # Open terminal dashboard
+clmem daemon               # Run in background
+clmem daemon --foreground  # Run in foreground (see logs)
+```
+
+### `clmem tui` — Interactive Dashboard
+
+Terminal UI with live memory charts, process list, and alerts. Connects to the daemon via IPC.
+
+```bash
+clmem tui
 ```
 
 | Key | Action |
 |-----|--------|
-| `↑↓` | Navigate process list |
-| `Enter` | Process detail view |
+| `Tab` | Cycle between panels |
+| `j/k` or `↑/↓` | Navigate process list |
 | `K` | Kill selected process |
-| `C` | Cleanup all orphans |
-| `R` | Refresh |
-| `Q` | Quit |
+| `r` | Refresh |
+| `1`-`5` | Sort by column |
+| `?` | Help |
+| `q` / `Esc` | Quit |
 
-### Commands
+### `clmem cleanup` — Process Cleanup
+
+Safety-first cleanup with multiple modes.
 
 ```bash
-clmem status               # Quick snapshot
-clmem status --json        # JSON output for scripting
-
-clmem cleanup              # Clean orphaned processes
+clmem cleanup              # Clean ORPHAN processes only
 clmem cleanup --dry-run    # Preview without executing
-clmem cleanup --force      # Include IDLE processes
-clmem cleanup --all        # All Claude processes (requires confirmation)
+clmem cleanup --force      # Also clean IDLE processes
+clmem cleanup --all        # All Claude processes (requires typing "yes")
+clmem cleanup --pids 1234,5678  # Specific PIDs
+```
 
-clmem history              # Memory usage history
-clmem history --last 1h    # Last hour
-clmem history --export     # Export to CSV
+### `clmem history` — Memory History
 
-clmem report               # Diagnostic report to stdout
-clmem report --output report.md
+Requires daemon running. Shows memory snapshots from the ring buffer.
 
-clmem config --show        # Show current config
-clmem config --edit        # Open config in editor
-clmem config --reset       # Reset to defaults
+```bash
+clmem history              # Last 60 snapshots
+clmem history -n 300       # Last 300 snapshots
+clmem history --csv        # Export as CSV
+```
+
+### `clmem report` — Diagnostic Report
+
+Generates a Markdown diagnostic report with system info, process details, and (if daemon running) history and events.
+
+```bash
+clmem report               # Output to stdout
+clmem report -o report.md  # Save to file
+```
+
+### `clmem config` — Configuration
+
+```bash
+clmem config show          # Display current config as TOML
+clmem config path          # Show config file location
+clmem config edit          # Open in $EDITOR (or notepad on Windows)
+clmem config reset         # Reset to defaults
 ```
 
 ## Configuration
 
 Default config location:
-- **Windows**: `%APPDATA%\clmem\clmem.toml`
-- **macOS**: `~/Library/Application Support/clmem/clmem.toml`
+- **Windows**: `%APPDATA%\clmem\clmem\clmem.toml`
+- **macOS**: `~/Library/Application Support/dev.clmem.clmem/clmem.toml`
 - **Linux**: `~/.config/clmem/clmem.toml`
 
-See [`clmem.toml.example`](clmem.toml.example) for all available options.
+See [`clmem.toml.example`](clmem.toml.example) for all options.
 
 ### Key Settings
 
-```toml
-[thresholds]
-vms_leak_rate = "500MB/10min"   # Alert when VMS grows faster than this
-rss_max = "2GB"                  # Alert when RSS exceeds this
-orphan_timeout = "15min"         # Time before STALE -> ORPHAN
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `scan_interval_ms` | `1000` | Process scan interval (ms) |
+| `history_retention_secs` | `3600` | Ring buffer retention (1 hour) |
+| `idle_threshold_secs` | `300` | Idle classification threshold (5 min) |
+| `stale_grace_period_secs` | `900` | Wait before STALE downgrade (15 min) |
+| `orphan_grace_period_secs` | `30` | Grace period after parent exits |
+| `leak_check_interval_secs` | `10` | Leak analysis interval |
+| `leak_growth_threshold_bytes_per_sec` | `1048576` | Leak alert threshold (1 MB/s) |
+| `auto_cleanup` | `false` | Auto-clean orphans when daemon running |
+| `log_level` | `"info"` | Logging verbosity |
 
-[cleanup]
-grace_period = "30s"             # Wait after main process exits
-auto_cleanup_orphans = true      # Auto-clean orphaned processes
-strategy = "terminate_tree"      # Kill entire process tree
+## Process Safety Classification
+
+`clmem` classifies every Claude Code process before taking any action:
+
+| State | Condition | Auto-cleanup | `--force` | `--all` |
+|-------|-----------|:------------:|:---------:|:-------:|
+| **ACTIVE** | Has TTY/stdin | Never | Never | Yes |
+| **IDLE** | Inactive < threshold | Never | Yes | Yes |
+| **STALE** | Inactive, parent alive | After grace period | Yes | Yes |
+| **ORPHAN** | Parent dead, no IPC | Yes | Yes | Yes |
+
+**Rule**: Active processes are never touched without `--all` + confirmation.
+
+## Architecture
+
 ```
-
-## Process Safety
-
-`clmem` classifies every Claude Code process into safety zones:
-
-| State | Indicator | Auto-cleanup | Description |
-|-------|-----------|-------------|-------------|
-| ACTIVE | `🟢` | Never | Has active TTY/stdin connection |
-| IDLE | `🟡` | Never | No activity for <5min, still connected |
-| STALE | `🟠` | After timeout | No activity, parent alive, waiting |
-| ORPHAN | `🔴` | Yes | Parent dead, no IPC connection |
-
-**Rule**: Active and idle processes are never automatically cleaned. Only `--force` allows manual intervention on idle processes.
-
-## How It Works
-
-1. **Scanner** polls the OS process table every second, filtering for Claude Code related processes (`node`, `claude`, MCP servers)
-2. **Profiler** records memory snapshots (RSS, VMS, Swap) into a ring buffer with 1-hour retention
-3. **Analyzer** evaluates memory trends every 10 seconds, detecting leaks by comparing VMS growth rate against thresholds
-4. **Reaper** safely terminates orphaned processes — `SIGTERM` first, then `SIGKILL` after timeout (Windows: `TerminateProcess` on entire process tree followed by `EmptyWorkingSet`)
+clmem (single binary)
+├── daemon    — Background engine (tokio async)
+│   ├── scanner    — Process table polling (1s interval)
+│   ├── profiler   — Ring buffer memory snapshots
+│   ├── analyzer   — Leak detection via linear regression
+│   ├── reaper     — Safe orphan termination
+│   └── event bus  — Publish/subscribe for alerts
+├── tui       — Terminal dashboard (ratatui + crossterm)
+│   ├── dashboard  — Memory gauges and summary stats
+│   ├── charts     — Real-time memory trend lines
+│   ├── process list — Sortable, color-coded table
+│   └── alerts     — Event history with severity colors
+├── cli       — Command interface (clap derive)
+│   ├── status, cleanup, history, report, config
+│   └── daemon/tui launchers
+├── platform  — OS abstraction (Platform trait)
+│   ├── windows    — sysinfo + Win32 (EmptyWorkingSet)
+│   ├── linux      — sysinfo + /proc filesystem
+│   └── macos      — sysinfo + libproc
+├── ipc       — Daemon <-> CLI/TUI communication
+│   └── Length-prefixed JSON over Unix socket / Named pipe
+└── models    — Shared data types
+    └── ProcessInfo, MemorySnapshot, Event, Config
+```
 
 ## Platform Support
 
 | Feature | Windows | Linux | macOS |
 |---------|---------|-------|-------|
-| Process monitoring | Win32 API | `/proc` | `libproc` |
-| Memory profiling | `GetProcessMemoryInfo` | `/proc/[pid]/smaps` | `mach_vm_region` |
-| Committed memory tracking | Native | N/A | N/A |
-| Handle leak detection | `NtQuerySystemInformation` | `/proc/[pid]/fd` | `proc_pidinfo` |
-| IPC | Named Pipes | Unix Socket | Unix Socket |
+| Process monitoring | sysinfo + Win32 | sysinfo + /proc | sysinfo + libproc |
+| Memory profiling | RSS/VMS/committed | RSS/VMS/swap | RSS/VMS |
+| TTY detection | Console check | /proc/[pid]/fd/0 | Stub |
+| IPC detection | Named pipe scan | /proc/[pid]/fd socket | Stub |
+| Process cleanup | Kill tree + EmptyWorkingSet | SIGTERM/SIGKILL | SIGTERM/SIGKILL |
+| IPC transport | Named Pipe | Unix Socket | Unix Socket |
 
 ## Tech Stack
 
-- **Language**: Rust
-- **Async Runtime**: tokio
-- **TUI**: ratatui + crossterm
-- **CLI**: clap (derive)
-- **System Info**: sysinfo
+| Crate | Purpose |
+|-------|---------|
+| `sysinfo` | Cross-platform process/memory info |
+| `ratatui` + `crossterm` | TUI rendering |
+| `clap` (derive) | CLI argument parsing |
+| `tokio` | Async runtime (daemon) |
+| `serde` + `toml` + `serde_json` | Config and IPC serialization |
+| `tracing` | Structured logging |
+| `anyhow` + `thiserror` | Error handling |
+| `chrono` | Timestamps |
+| `directories` | Platform config paths |
 
 ## License
 

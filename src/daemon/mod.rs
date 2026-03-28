@@ -151,11 +151,13 @@ impl Daemon {
             }
 
             IpcMessage::GetHistory { last_n } => {
+                let last_n = last_n.min(3600);
                 let profiler = self.profiler.lock().await;
                 IpcResponse::History(profiler.get_history(last_n))
             }
 
             IpcMessage::GetEvents { last_n } => {
+                let last_n = last_n.min(1000);
                 let bus = self.event_bus.lock().await;
                 IpcResponse::Events(bus.get_recent(last_n))
             }
@@ -257,9 +259,9 @@ async fn run_daemon_arc(daemon: Arc<Daemon>) -> Result<()> {
 
     let ipc_handle = start_ipc_listener(Arc::clone(&daemon), &ipc_path).await?;
 
-    let scan_interval = tokio::time::Duration::from_millis(daemon.config.scan_interval_ms);
+    let scan_interval = tokio::time::Duration::from_millis(daemon.config.scan_interval_ms.max(100));
     let leak_check_interval =
-        tokio::time::Duration::from_secs(daemon.config.leak_check_interval_secs);
+        tokio::time::Duration::from_secs(daemon.config.leak_check_interval_secs.max(1));
 
     let mut scan_ticker = tokio::time::interval(scan_interval);
     let mut leak_ticker = tokio::time::interval(leak_check_interval);
@@ -324,12 +326,26 @@ async fn start_ipc_listener_platform(
     ipc_path: &std::path::Path,
 ) -> Result<tokio::task::JoinHandle<()>> {
     let listener = tokio::net::UnixListener::bind(ipc_path)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(ipc_path, std::fs::Permissions::from_mode(0o600))?;
+        tracing::info!("IPC socket permissions set to 0o600");
+    }
+    let max_connections = Arc::new(tokio::sync::Semaphore::new(32));
     let handle = tokio::spawn(async move {
         loop {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
+                    let permit = match max_connections.clone().try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            tracing::warn!("Max IPC connections reached, rejecting");
+                            continue;
+                        }
+                    };
                     let daemon = Arc::clone(&daemon);
                     tokio::spawn(async move {
+                        let _permit = permit;
                         if let Err(e) = handle_unix_connection(daemon, stream).await {
                             tracing::debug!(error = %e, "IPC connection error");
                         }
@@ -367,6 +383,7 @@ async fn start_ipc_listener_platform(
 
     tracing::info!(pipe = %pipe_name, "Windows named pipe server created");
 
+    let max_connections = Arc::new(tokio::sync::Semaphore::new(32));
     let handle = tokio::spawn(async move {
         loop {
             // Wait for a client to connect
@@ -393,8 +410,17 @@ async fn start_ipc_listener_platform(
             let connected_pipe = server;
             server = new_server;
 
+            let permit = match max_connections.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::warn!("Max IPC connections reached, rejecting");
+                    connected_pipe.disconnect().ok();
+                    continue;
+                }
+            };
             let daemon = Arc::clone(&daemon);
             tokio::spawn(async move {
+                let _permit = permit;
                 if let Err(e) = handle_windows_pipe_async(daemon, connected_pipe).await {
                     tracing::debug!(error = %e, "Named pipe connection error");
                 }

@@ -23,6 +23,7 @@ pub fn run(foreground: bool) -> Result<()> {
 
     let config = Config::load()?;
     tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
         scan_interval_ms = config.scan_interval_ms,
         auto_cleanup = config.auto_cleanup,
         "Starting daemon"

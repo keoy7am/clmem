@@ -375,7 +375,14 @@ impl App {
             .map(|(msg, _)| msg.as_str())
             .unwrap_or("");
 
+        let version = env!("CARGO_PKG_VERSION");
+
         let line = Line::from(vec![
+            Span::styled(
+                format!(" clmem v{version} "),
+                Style::default().fg(Color::DarkGray).bg(Color::Black),
+            ),
+            Span::raw(" "),
             conn_status,
             Span::raw(" "),
             Span::styled(format!("[{panel_name}]"), Style::default().fg(Color::Cyan)),

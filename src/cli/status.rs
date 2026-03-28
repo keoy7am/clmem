@@ -18,6 +18,8 @@ pub fn run(json: bool) -> Result<()> {
         return Ok(());
     }
 
+    println!("clmem v{}", env!("CARGO_PKG_VERSION"));
+
     // Header
     println!("clmem - Claude Code Memory Monitor");
     println!("{}", "=".repeat(60));

@@ -31,7 +31,6 @@ pub fn run(foreground: bool) -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let mut daemon = crate::daemon::Daemon::new(config)?;
-        daemon.run().await
+        crate::daemon::run_daemon(config).await
     })
 }

@@ -14,11 +14,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 
 use crate::ipc::{default_ipc_path, IpcMessage, IpcResponse};
 use crate::models::{Config, Event, EventKind};
-use crate::platform::{create_platform, Platform};
+use crate::platform::create_platform;
 
 /// PID file path for the daemon process.
 fn pid_file_path() -> std::path::PathBuf {
@@ -33,36 +33,36 @@ fn pid_file_path() -> std::path::PathBuf {
 /// The main daemon orchestrating all monitoring subsystems.
 pub struct Daemon {
     config: Config,
-    #[allow(dead_code)]
-    platform: Arc<dyn Platform>,
     scanner: Mutex<Scanner>,
     profiler: Mutex<Profiler>,
     analyzer: Analyzer,
     reaper: Reaper,
     event_bus: Mutex<EventBus>,
     start_time: chrono::DateTime<Utc>,
+    shutdown_tx: watch::Sender<bool>,
 }
 
 impl Daemon {
     /// Create a new daemon with the given configuration.
     pub fn new(config: Config) -> Result<Self> {
-        let platform: Arc<dyn Platform> = Arc::from(create_platform());
+        let platform: Arc<dyn crate::platform::Platform> = Arc::from(create_platform());
 
         let scanner = Scanner::new(Arc::clone(&platform), config.clone());
         let profiler = Profiler::new(Arc::clone(&platform), &config);
         let analyzer = Analyzer::new(config.clone());
         let reaper = Reaper::new(Arc::clone(&platform), config.clone());
         let event_bus = EventBus::new(1000);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
 
         Ok(Self {
             config,
-            platform,
             scanner: Mutex::new(scanner),
             profiler: Mutex::new(profiler),
             analyzer,
             reaper,
             event_bus: Mutex::new(event_bus),
             start_time: Utc::now(),
+            shutdown_tx,
         })
     }
 
@@ -183,25 +183,10 @@ impl Daemon {
 
             IpcMessage::Shutdown => {
                 tracing::info!("Shutdown requested via IPC");
+                let _ = self.shutdown_tx.send(true);
                 IpcResponse::Ok
             }
         }
-    }
-
-    /// Run the daemon main loop with graceful shutdown support.
-    ///
-    /// Note: this consumes self by wrapping it in an Arc for IPC dispatch.
-    /// The `&mut self` signature is kept for CLI compatibility; the mutable
-    /// borrow is released immediately.
-    pub async fn run(&mut self) -> Result<()> {
-        // We need Arc ownership for the IPC server to dispatch back to the daemon.
-        // Since we can't move out of &mut self, we swap fields into a new Daemon
-        // and wrap it. The caller should not use self after calling run().
-        //
-        // Alternative: The CLI could call run_daemon() directly. For now, we
-        // reconstruct an Arc-wrapped daemon from self's config.
-        let config = self.config.clone();
-        run_daemon(config).await
     }
 
     fn write_pid_file(&self) -> Result<()> {
@@ -254,7 +239,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
 /// Internal: run the daemon loop with Arc ownership.
 async fn run_daemon_arc(daemon: Arc<Daemon>) -> Result<()> {
     tracing::info!(
-        platform = daemon.platform.name(),
+        platform = std::env::consts::OS,
         scan_interval_ms = daemon.config.scan_interval_ms,
         "Daemon starting"
     );
@@ -283,6 +268,8 @@ async fn run_daemon_arc(daemon: Arc<Daemon>) -> Result<()> {
 
     leak_ticker.tick().await;
 
+    let mut shutdown_rx = daemon.shutdown_tx.subscribe();
+
     loop {
         tokio::select! {
             _ = scan_ticker.tick() => {
@@ -292,7 +279,11 @@ async fn run_daemon_arc(daemon: Arc<Daemon>) -> Result<()> {
                 daemon.run_leak_analysis().await;
             }
             _ = tokio::signal::ctrl_c() => {
-                tracing::info!("Shutdown signal received");
+                tracing::info!("Ctrl+C received, shutting down");
+                break;
+            }
+            _ = shutdown_rx.changed() => {
+                tracing::info!("Shutdown requested via IPC, shutting down");
                 break;
             }
         }

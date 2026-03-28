@@ -491,7 +491,7 @@ impl App {
             &self.ipc_path,
             &IpcMessage::Cleanup {
                 pids: vec![pid],
-                force: false,
+                force: true,
             },
         ) {
             Ok(IpcResponse::CleanupResult { cleaned, failed }) => {

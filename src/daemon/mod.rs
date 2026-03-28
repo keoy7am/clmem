@@ -357,25 +357,49 @@ async fn start_ipc_listener_platform(
     daemon: Arc<Daemon>,
     ipc_path: &std::path::Path,
 ) -> Result<tokio::task::JoinHandle<()>> {
-    let pipe_path = ipc_path.to_path_buf();
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let pipe_name = ipc_path.to_string_lossy().to_string();
+
+    // Create the first pipe server instance
+    let mut server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&pipe_name)?;
+
+    tracing::info!(pipe = %pipe_name, "Windows named pipe server created");
+
     let handle = tokio::spawn(async move {
         loop {
-            let daemon = Arc::clone(&daemon);
-            let path = pipe_path.clone();
-            let result =
-                tokio::task::spawn_blocking(move || handle_windows_pipe(daemon, &path)).await;
-
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::debug!(error = %e, "Named pipe connection error");
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "Named pipe task panicked");
-                }
+            // Wait for a client to connect
+            if let Err(e) = server.connect().await {
+                tracing::error!(error = %e, "Named pipe connect error");
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                continue;
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            tracing::debug!("Named pipe client connected");
+
+            // Create a new server instance for the next client BEFORE handling this one
+            let new_server = match ServerOptions::new().create(&pipe_name) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to create next pipe instance");
+                    // Disconnect current and retry
+                    server.disconnect().ok();
+                    continue;
+                }
+            };
+
+            // Hand off current connection, swap in new server for next iteration
+            let connected_pipe = server;
+            server = new_server;
+
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                if let Err(e) = handle_windows_pipe_async(daemon, connected_pipe).await {
+                    tracing::debug!(error = %e, "Named pipe connection error");
+                }
+            });
         }
     });
     Ok(handle)
@@ -413,28 +437,14 @@ async fn handle_unix_connection(daemon: Arc<Daemon>, stream: tokio::net::UnixStr
 }
 
 #[cfg(windows)]
-fn handle_windows_pipe(daemon: Arc<Daemon>, path: &std::path::Path) -> Result<()> {
-    use std::fs::OpenOptions;
-    use std::io::{Read, Write};
-
-    let pipe_path_str = path.to_string_lossy();
-    let expected_prefix = "\\\\.\\pipe\\";
-    if !pipe_path_str.starts_with(expected_prefix) {
-        anyhow::bail!("Invalid named pipe path: {}", pipe_path_str);
-    }
-
-    let mut pipe = match OpenOptions::new().read(true).write(true).open(path) {
-        Ok(p) => p,
-        Err(_) => {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            return Ok(());
-        }
-    };
+async fn handle_windows_pipe_async(
+    daemon: Arc<Daemon>,
+    mut pipe: tokio::net::windows::named_pipe::NamedPipeServer,
+) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut len_buf = [0u8; 4];
-    if pipe.read_exact(&mut len_buf).is_err() {
-        return Ok(());
-    }
+    pipe.read_exact(&mut len_buf).await?;
     let msg_len = u32::from_le_bytes(len_buf) as usize;
 
     if msg_len > 16 * 1024 * 1024 {
@@ -442,19 +452,21 @@ fn handle_windows_pipe(daemon: Arc<Daemon>, path: &std::path::Path) -> Result<()
     }
 
     let mut msg_buf = vec![0u8; msg_len];
-    pipe.read_exact(&mut msg_buf)?;
+    pipe.read_exact(&mut msg_buf).await?;
     let msg: IpcMessage = serde_json::from_slice(&msg_buf)?;
 
     tracing::debug!(?msg, "IPC message received (Windows pipe)");
 
-    let rt = tokio::runtime::Handle::current();
-    let response = rt.block_on(daemon.handle_message(msg));
+    let response = daemon.handle_message(msg).await;
 
     let resp_bytes = serde_json::to_vec(&response)?;
     let resp_len = (resp_bytes.len() as u32).to_le_bytes();
-    pipe.write_all(&resp_len)?;
-    pipe.write_all(&resp_bytes)?;
-    pipe.flush()?;
+    pipe.write_all(&resp_len).await?;
+    pipe.write_all(&resp_bytes).await?;
+    pipe.flush().await?;
+
+    // Disconnect so the pipe instance is properly cleaned up
+    pipe.disconnect()?;
 
     Ok(())
 }

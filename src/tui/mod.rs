@@ -5,6 +5,8 @@ mod process_list;
 
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -70,6 +72,15 @@ struct ConfirmDialog {
     name: String,
 }
 
+/// Data received from daemon via background IPC poller.
+struct IpcData {
+    snapshot: Option<Box<MemorySnapshot>>,
+    uptime_secs: Option<u64>,
+    events: Vec<crate::models::Event>,
+    history: Vec<MemorySnapshot>,
+    connected: bool,
+}
+
 /// The interactive TUI application.
 ///
 /// Built by the tui-dashboard team using ratatui + crossterm.
@@ -86,6 +97,8 @@ pub struct App {
     confirm_kill: Option<ConfirmDialog>,
     status_message: Option<(String, Instant)>,
     daemon_connected: bool,
+    ipc_rx: Option<mpsc::Receiver<IpcData>>,
+    poller_stop: Arc<AtomicBool>,
 }
 
 impl App {
@@ -103,6 +116,8 @@ impl App {
             confirm_kill: None,
             status_message: None,
             daemon_connected: false,
+            ipc_rx: None,
+            poller_stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -118,10 +133,13 @@ impl App {
         let tick_rate = Duration::from_millis(250);
         let mut last_tick = Instant::now();
 
-        // Initial data fetch
-        self.update();
+        // Start background IPC poller (non-blocking data fetch)
+        self.start_poller();
 
         let result = self.main_loop(&mut terminal, tick_rate, &mut last_tick);
+
+        // Signal background poller to stop
+        self.poller_stop.store(true, Ordering::Relaxed);
 
         // Terminal cleanup (always runs)
         disable_raw_mode()?;
@@ -244,53 +262,95 @@ impl App {
         }
     }
 
-    /// Poll the daemon for fresh data.
+    /// Start background thread that polls daemon for data via IPC.
+    fn start_poller(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        self.ipc_rx = Some(rx);
+        let ipc_path = self.ipc_path.clone();
+        let stop = self.poller_stop.clone();
+
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let mut data = IpcData {
+                    snapshot: None,
+                    uptime_secs: None,
+                    events: Vec::new(),
+                    history: Vec::new(),
+                    connected: false,
+                };
+
+                match ipc::send_request(&ipc_path, &IpcMessage::GetSnapshot) {
+                    Ok(IpcResponse::Snapshot(snapshot)) => {
+                        data.connected = true;
+                        data.snapshot = Some(snapshot);
+                    }
+                    Ok(_) => {
+                        data.connected = true;
+                    }
+                    Err(_) => {
+                        data.connected = false;
+                    }
+                }
+
+                if data.connected {
+                    if let Ok(IpcResponse::Status { uptime_secs, .. }) =
+                        ipc::send_request(&ipc_path, &IpcMessage::GetStatus)
+                    {
+                        data.uptime_secs = Some(uptime_secs);
+                    }
+
+                    if let Ok(IpcResponse::Events(events)) =
+                        ipc::send_request(&ipc_path, &IpcMessage::GetEvents { last_n: 50 })
+                    {
+                        data.events = events;
+                    }
+
+                    if let Ok(IpcResponse::History(history)) =
+                        ipc::send_request(&ipc_path, &IpcMessage::GetHistory { last_n: 300 })
+                    {
+                        data.history = history;
+                    }
+                }
+
+                let _ = tx.send(data);
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        });
+    }
+
+    /// Consume latest IPC data from background poller (non-blocking).
     fn update(&mut self) {
-        // Try to get a snapshot
-        match ipc::send_request(&self.ipc_path, &IpcMessage::GetSnapshot) {
-            Ok(IpcResponse::Snapshot(snapshot)) => {
-                self.daemon_connected = true;
+        let mut latest: Option<IpcData> = None;
+        if let Some(ref rx) = self.ipc_rx {
+            while let Ok(data) = rx.try_recv() {
+                latest = Some(data);
+            }
+        }
+
+        if let Some(data) = latest {
+            self.daemon_connected = data.connected;
+
+            if let Some(snapshot) = data.snapshot {
                 let mut snap = *snapshot;
                 self.dashboard.update(&snap);
                 self.process_list.update(std::mem::take(&mut snap.processes));
                 self.last_snapshot = Some(snap);
             }
-            Ok(_) => {
-                self.daemon_connected = true;
-            }
-            Err(_) => {
-                self.daemon_connected = false;
-            }
-        }
 
-        // Try to get daemon status for uptime
-        if self.daemon_connected {
-            if let Ok(IpcResponse::Status { uptime_secs, .. }) =
-                ipc::send_request(&self.ipc_path, &IpcMessage::GetStatus)
-            {
-                self.dashboard.set_uptime(uptime_secs);
+            if let Some(uptime) = data.uptime_secs {
+                self.dashboard.set_uptime(uptime);
             }
-        }
 
-        // Try to get events
-        if self.daemon_connected {
-            if let Ok(IpcResponse::Events(events)) =
-                ipc::send_request(&self.ipc_path, &IpcMessage::GetEvents { last_n: 50 })
-            {
-                self.alerts.update(&events);
+            if !data.events.is_empty() {
+                self.alerts.update(&data.events);
             }
-        }
 
-        // Try to get history for chart
-        if self.daemon_connected {
-            if let Ok(IpcResponse::History(history)) =
-                ipc::send_request(&self.ipc_path, &IpcMessage::GetHistory { last_n: 300 })
-            {
-                self.chart.update(&history);
+            if !data.history.is_empty() {
+                self.chart.update(&data.history);
             }
-        }
 
-        self.dashboard.set_alert_count(self.alerts.alert_count());
+            self.dashboard.set_alert_count(self.alerts.alert_count());
+        }
     }
 
     fn render(&self, frame: &mut Frame) {

@@ -16,6 +16,8 @@ struct TrackedProcess {
     #[allow(dead_code)]
     last_state_change: DateTime<Utc>,
     stale_since: Option<DateTime<Utc>>,
+    /// Last observed RSS to detect activity changes.
+    last_rss: u64,
 }
 
 /// Polls for Claude Code processes and classifies their state according to safety rules.
@@ -60,21 +62,43 @@ impl Scanner {
             let pid = proc_info.pid;
             seen_pids.push(pid);
 
-            // Classify the process state
-            let new_state = self.classify(&proc_info, now);
-            proc_info.state = new_state;
+            if self.known_processes.contains_key(&pid) {
+                // Extract data from tracked process (release mutable borrow)
+                let (old_started_at, old_last_activity, old_rss, old_state) = {
+                    let tracked = self.known_processes.get(&pid).unwrap();
+                    (
+                        tracked.info.started_at,
+                        tracked.info.last_activity,
+                        tracked.last_rss,
+                        tracked.info.state,
+                    )
+                };
 
-            if let Some(tracked) = self.known_processes.get_mut(&pid) {
-                let old_state = tracked.info.state;
+                // Preserve started_at from first observation
+                proc_info.started_at = old_started_at;
 
-                // Update stale_since tracking
+                // Detect activity: if RSS changed, process is doing something
+                let rss_changed = proc_info.memory.rss_bytes != old_rss;
+                if rss_changed || proc_info.last_activity > old_last_activity {
+                    proc_info.last_activity = now;
+                } else {
+                    proc_info.last_activity = old_last_activity;
+                }
+
+                // Classify with immutable self (no borrow conflict)
+                let new_state = self.classify(&proc_info, now);
+                proc_info.state = new_state;
+
+                // Now mutate the tracked entry
+                let tracked = self.known_processes.get_mut(&pid).unwrap();
+                tracked.last_rss = proc_info.memory.rss_bytes;
+
                 if new_state == ProcessState::Stale && tracked.stale_since.is_none() {
                     tracked.stale_since = Some(now);
                 } else if new_state != ProcessState::Stale {
                     tracked.stale_since = None;
                 }
 
-                // Emit state change event if state differs
                 if old_state != new_state {
                     tracing::info!(pid, %old_state, %new_state, "Process state changed");
                     events.push(Event::new(EventKind::StateChange {
@@ -94,6 +118,11 @@ impl Scanner {
                     name: proc_info.name.clone(),
                 }));
 
+                let initial_rss = proc_info.memory.rss_bytes;
+                // Classify the new process
+                let new_state = self.classify(&proc_info, now);
+                proc_info.state = new_state;
+
                 let stale_since = if new_state == ProcessState::Stale {
                     Some(now)
                 } else {
@@ -107,6 +136,7 @@ impl Scanner {
                         first_seen: now,
                         last_state_change: now,
                         stale_since,
+                        last_rss: initial_rss,
                     },
                 );
             }

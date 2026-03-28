@@ -62,13 +62,40 @@ impl Platform for WindowsPlatform {
                 committed_bytes: proc.memory(), // Approximation; refined later with Win32 API
             };
 
-            // Initial classification -- daemon scanner will refine with TTY/IPC checks
-            let has_tty = false;
+            // Use sysinfo start_time (seconds since UNIX epoch)
+            let started_at = {
+                let epoch_secs = proc.start_time() as i64;
+                chrono::DateTime::from_timestamp(epoch_secs, 0).unwrap_or_else(Utc::now)
+            };
+
+            // Estimate last_activity from CPU usage: if cpu > 0, active now
+            // Scanner will refine this by tracking CPU time changes
+            let last_activity = if proc.cpu_usage() > 0.0 {
+                Utc::now()
+            } else {
+                started_at
+            };
+
+            // Check if parent is a known terminal process (cmd, powershell, etc.)
+            let has_tty = proc.parent().map(|ppid| {
+                sys.process(ppid)
+                    .map(|parent| {
+                        let pname = parent.name().to_string_lossy().to_lowercase();
+                        pname.contains("cmd.exe")
+                            || pname.contains("powershell")
+                            || pname.contains("pwsh")
+                            || pname.contains("windowsterminal")
+                            || pname.contains("conhost")
+                            || pname.contains("wt.exe")
+                    })
+                    .unwrap_or(false)
+            }).unwrap_or(false);
+
             let has_ipc = false;
-            let state = if proc.parent().is_none() && !has_ipc {
-                ProcessState::Orphan
-            } else if has_tty {
+            let state = if has_tty {
                 ProcessState::Active
+            } else if proc.parent().is_none() && !has_ipc {
+                ProcessState::Orphan
             } else {
                 ProcessState::Idle
             };
@@ -80,8 +107,8 @@ impl Platform for WindowsPlatform {
                 cmdline,
                 state,
                 memory,
-                started_at: Utc::now(), // sysinfo doesn't expose start time reliably
-                last_activity: Utc::now(),
+                started_at,
+                last_activity,
                 has_tty,
                 has_ipc,
             });

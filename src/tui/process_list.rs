@@ -189,7 +189,7 @@ impl ProcessListPanel {
         processes.sort_by(|a, b| {
             let ord = match self.sort_column {
                 SortColumn::Pid => a.pid.cmp(&b.pid),
-                SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                SortColumn::Name => a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()),
                 SortColumn::Rss => a.memory.rss_bytes.cmp(&b.memory.rss_bytes),
                 SortColumn::Vms => a.memory.vms_bytes.cmp(&b.memory.vms_bytes),
                 SortColumn::State => state_order(a.state).cmp(&state_order(b.state)),
@@ -238,10 +238,11 @@ fn format_duration(secs: u64) -> String {
 
 /// Truncate a name to fit within a column width.
 fn truncate_name(name: &str, max_len: usize) -> String {
-    if name.len() <= max_len {
+    if name.chars().count() <= max_len {
         name.to_string()
     } else {
-        format!("{}...", &name[..max_len.saturating_sub(3)])
+        let truncated: String = name.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{truncated}...")
     }
 }
 

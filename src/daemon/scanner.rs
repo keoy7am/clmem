@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -9,12 +9,6 @@ use crate::platform::Platform;
 /// A process being tracked by the scanner with metadata for state classification.
 struct TrackedProcess {
     info: ProcessInfo,
-    /// When this process was first discovered (retained for diagnostics).
-    #[allow(dead_code)]
-    first_seen: DateTime<Utc>,
-    /// When the process last changed state (retained for diagnostics).
-    #[allow(dead_code)]
-    last_state_change: DateTime<Utc>,
     stale_since: Option<DateTime<Utc>>,
     /// Last observed RSS to detect activity changes.
     last_rss: u64,
@@ -56,11 +50,11 @@ impl Scanner {
         };
 
         // Track which PIDs are still alive this cycle
-        let mut seen_pids: Vec<u32> = Vec::with_capacity(processes.len());
+        let mut seen_pids: HashSet<u32> = HashSet::with_capacity(processes.len());
 
         for mut proc_info in processes {
             let pid = proc_info.pid;
-            seen_pids.push(pid);
+            seen_pids.insert(pid);
 
             if self.known_processes.contains_key(&pid) {
                 // Extract data from tracked process (release mutable borrow)
@@ -106,7 +100,6 @@ impl Scanner {
                         from: old_state,
                         to: new_state,
                     }));
-                    tracked.last_state_change = now;
                 }
 
                 tracked.info = proc_info;
@@ -133,8 +126,6 @@ impl Scanner {
                     pid,
                     TrackedProcess {
                         info: proc_info,
-                        first_seen: now,
-                        last_state_change: now,
                         stale_since,
                         last_rss: initial_rss,
                     },

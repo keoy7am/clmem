@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -17,7 +19,7 @@ struct AlertEntry {
 
 /// Scrollable alerts panel showing recent events with severity coloring.
 pub struct AlertsPanel {
-    alerts: Vec<AlertEntry>,
+    alerts: VecDeque<AlertEntry>,
     max_alerts: usize,
     scroll_offset: usize,
 }
@@ -25,7 +27,7 @@ pub struct AlertsPanel {
 impl AlertsPanel {
     pub fn new(max_alerts: usize) -> Self {
         Self {
-            alerts: Vec::new(),
+            alerts: VecDeque::new(),
             max_alerts,
             scroll_offset: 0,
         }
@@ -73,7 +75,7 @@ impl AlertsPanel {
             };
 
             let timestamp = event.timestamp.format("%H:%M:%S").to_string();
-            self.alerts.push(AlertEntry {
+            self.alerts.push_back(AlertEntry {
                 timestamp,
                 level,
                 message,
@@ -82,20 +84,20 @@ impl AlertsPanel {
 
         // Trim to max alerts
         while self.alerts.len() > self.max_alerts {
-            self.alerts.remove(0);
+            self.alerts.pop_front();
         }
     }
 
     /// Add a local alert (not from daemon events).
     pub fn add_alert(&mut self, level: AlertLevel, message: String) {
         let timestamp = chrono::Utc::now().format("%H:%M:%S").to_string();
-        self.alerts.push(AlertEntry {
+        self.alerts.push_back(AlertEntry {
             timestamp,
             level,
             message,
         });
         while self.alerts.len() > self.max_alerts {
-            self.alerts.remove(0);
+            self.alerts.pop_front();
         }
     }
 
@@ -123,8 +125,10 @@ impl AlertsPanel {
         let end = total.saturating_sub(self.scroll_offset);
         let start = end.saturating_sub(inner_height);
 
-        let items: Vec<ListItem> = self.alerts[start..end]
+        let items: Vec<ListItem> = self.alerts
             .iter()
+            .skip(start)
+            .take(end - start)
             .map(|entry| {
                 let (level_color, level_modifier) = level_style(entry.level);
                 let line = Line::from(vec![

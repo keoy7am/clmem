@@ -24,17 +24,29 @@ impl Analyzer {
             return events;
         }
 
-        // Collect all unique PIDs across the history window
-        let mut pid_set: HashMap<u32, bool> = HashMap::new();
+        // Pre-index snapshots by PID: pid -> Vec<(time_offset_secs, vms_bytes)>
+        let first_ts = match history.first() {
+            Some(s) => s.timestamp,
+            None => return events,
+        };
+        let mut pid_series: HashMap<u32, Vec<(f64, f64)>> = HashMap::new();
         for snapshot in history {
+            let time_offset = snapshot
+                .timestamp
+                .signed_duration_since(first_ts)
+                .num_milliseconds() as f64
+                / 1000.0;
             for proc in &snapshot.processes {
-                pid_set.entry(proc.pid).or_insert(true);
+                pid_series
+                    .entry(proc.pid)
+                    .or_default()
+                    .push((time_offset, proc.memory.vms_bytes as f64));
             }
         }
 
         // Check each PID for sustained memory growth
-        for &pid in pid_set.keys() {
-            if let Some(growth_rate) = self.calculate_growth_rate(pid, history) {
+        for (&pid, data_points) in &pid_series {
+            if let Some(growth_rate) = self.calculate_growth_rate(data_points) {
                 if growth_rate > self.config.leak_growth_threshold_bytes_per_sec {
                     tracing::warn!(
                         pid,
@@ -53,30 +65,11 @@ impl Analyzer {
         events
     }
 
-    /// Calculate the VMS growth rate (bytes/sec) for a specific process across snapshots.
+    /// Calculate the VMS growth rate (bytes/sec) from pre-indexed data points.
     ///
-    /// Uses linear regression over the data points where the process is present.
-    /// Returns `None` if there are fewer than 2 data points for this PID.
-    fn calculate_growth_rate(&self, pid: u32, snapshots: &[MemorySnapshot]) -> Option<f64> {
-        // Collect (time_offset_secs, vms_bytes) pairs for this PID
-        let first_ts = snapshots.first()?.timestamp;
-        let mut data_points: Vec<(f64, f64)> = Vec::new();
-
-        for snapshot in snapshots {
-            let time_offset = snapshot
-                .timestamp
-                .signed_duration_since(first_ts)
-                .num_milliseconds() as f64
-                / 1000.0;
-
-            for proc in &snapshot.processes {
-                if proc.pid == pid {
-                    data_points.push((time_offset, proc.memory.vms_bytes as f64));
-                    break;
-                }
-            }
-        }
-
+    /// Uses linear regression over the (time_offset_secs, vms_bytes) pairs.
+    /// Returns `None` if there are fewer than 10 data points or insufficient time span.
+    fn calculate_growth_rate(&self, data_points: &[(f64, f64)]) -> Option<f64> {
         if data_points.len() < 10 {
             return None;
         }
@@ -97,7 +90,7 @@ impl Analyzer {
         let mut numerator = 0.0;
         let mut denominator = 0.0;
 
-        for &(x, y) in &data_points {
+        for &(x, y) in data_points {
             let dx = x - mean_x;
             let dy = y - mean_y;
             numerator += dx * dy;

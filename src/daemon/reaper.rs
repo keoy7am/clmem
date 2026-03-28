@@ -141,16 +141,15 @@ impl Reaper {
         }
 
         // Step 2: Wait grace period for process to exit
-        let grace_ms = self.config.orphan_grace_period_secs * 1000;
+        let grace = std::time::Duration::from_secs(self.config.orphan_grace_period_secs);
         let check_interval = std::time::Duration::from_millis(500);
-        let mut elapsed = 0u64;
+        let start = std::time::Instant::now();
 
-        while elapsed < grace_ms {
+        while start.elapsed() < grace {
             tokio::time::sleep(check_interval).await;
-            elapsed += 500;
 
             if !self.platform.is_process_alive(pid) {
-                tracing::debug!(pid, elapsed_ms = elapsed, "Process exited gracefully");
+                tracing::debug!(pid, elapsed_ms = start.elapsed().as_millis() as u64, "Process exited gracefully");
                 // Release memory on Windows
                 let _ = self.platform.release_memory(pid);
                 return true;

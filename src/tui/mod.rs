@@ -150,7 +150,11 @@ impl App {
 
             if event::poll(timeout)? {
                 if let Event::Key(key) = event::read()? {
-                    self.handle_key(key);
+                    // Windows sends both Press and Release events.
+                    // Only handle Press to avoid double-triggering.
+                    if key.kind == crossterm::event::KeyEventKind::Press {
+                        self.handle_key(key);
+                    }
                 }
             }
 

@@ -41,16 +41,24 @@ impl ProcessListPanel {
     }
 
     pub fn update(&mut self, mut processes: Vec<ProcessInfo>) {
+        // Remember which PID was selected so we can restore it after re-sort
+        let selected_pid = self.selected_process().map(|p| p.pid);
+
         self.sort_processes(&mut processes);
         self.processes = processes;
-        // Clamp selection to valid range
+
         if self.processes.is_empty() {
             self.state.select(None);
+        } else if let Some(pid) = selected_pid {
+            // Find the same PID in the new list
+            let new_idx = self
+                .processes
+                .iter()
+                .position(|p| p.pid == pid)
+                .unwrap_or(0);
+            self.state.select(Some(new_idx));
         } else {
-            let sel = self.state.selected().unwrap_or(0);
-            if sel >= self.processes.len() {
-                self.state.select(Some(self.processes.len() - 1));
-            }
+            self.state.select(Some(0));
         }
     }
 

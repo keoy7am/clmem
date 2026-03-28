@@ -317,7 +317,11 @@ async fn start_ipc_listener(
 ) -> Result<tokio::task::JoinHandle<()>> {
     #[cfg(unix)]
     if ipc_path.exists() {
-        let _ = std::fs::remove_file(ipc_path);
+        if let Err(e) = std::fs::remove_file(ipc_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(error = %e, path = %ipc_path.display(), "Failed to remove stale IPC socket");
+            }
+        }
     }
 
     tracing::info!(path = %ipc_path.display(), "Starting IPC server");
@@ -361,10 +365,16 @@ async fn start_ipc_listener_platform(
 
     let pipe_name = ipc_path.to_string_lossy().to_string();
 
+    // Check if another daemon is already running by trying to connect as a client
+    if tokio::net::windows::named_pipe::ClientOptions::new()
+        .open(&pipe_name)
+        .is_ok()
+    {
+        anyhow::bail!("Another daemon instance is already running");
+    }
+
     // Create the first pipe server instance
-    let mut server = ServerOptions::new()
-        .first_pipe_instance(true)
-        .create(&pipe_name)?;
+    let mut server = ServerOptions::new().create(&pipe_name)?;
 
     tracing::info!(pipe = %pipe_name, "Windows named pipe server created");
 
@@ -407,6 +417,17 @@ async fn start_ipc_listener_platform(
 
 #[cfg(unix)]
 async fn handle_unix_connection(daemon: Arc<Daemon>, stream: tokio::net::UnixStream) -> Result<()> {
+    match tokio::time::timeout(std::time::Duration::from_secs(10), handle_unix_connection_inner(daemon, stream)).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!("IPC connection timed out");
+            Ok(())
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn handle_unix_connection_inner(daemon: Arc<Daemon>, stream: tokio::net::UnixStream) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let (mut reader, mut writer) = stream.into_split();
@@ -438,6 +459,20 @@ async fn handle_unix_connection(daemon: Arc<Daemon>, stream: tokio::net::UnixStr
 
 #[cfg(windows)]
 async fn handle_windows_pipe_async(
+    daemon: Arc<Daemon>,
+    pipe: tokio::net::windows::named_pipe::NamedPipeServer,
+) -> Result<()> {
+    match tokio::time::timeout(std::time::Duration::from_secs(10), handle_windows_pipe_async_inner(daemon, pipe)).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!("IPC connection timed out (Windows pipe)");
+            Ok(())
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn handle_windows_pipe_async_inner(
     daemon: Arc<Daemon>,
     mut pipe: tokio::net::windows::named_pipe::NamedPipeServer,
 ) -> Result<()> {

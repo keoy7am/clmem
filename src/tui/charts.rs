@@ -22,7 +22,7 @@ pub struct ChartPanel {
     /// Maximum Y value seen (for axis scaling)
     max_y: f64,
     /// Display window in seconds
-    pub timespan_secs: u64,
+    timespan_secs: u64,
 }
 
 impl ChartPanel {

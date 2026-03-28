@@ -250,9 +250,10 @@ impl App {
         match ipc::send_request(&self.ipc_path, &IpcMessage::GetSnapshot) {
             Ok(IpcResponse::Snapshot(snapshot)) => {
                 self.daemon_connected = true;
-                self.dashboard.update(&snapshot);
-                self.process_list.update(snapshot.processes.clone());
-                self.last_snapshot = Some(*snapshot);
+                let mut snap = *snapshot;
+                self.dashboard.update(&snap);
+                self.process_list.update(std::mem::take(&mut snap.processes));
+                self.last_snapshot = Some(snap);
             }
             Ok(_) => {
                 self.daemon_connected = true;

@@ -21,8 +21,6 @@ pub enum IpcMessage {
     Cleanup { pids: Vec<u32>, force: bool },
     /// Request current config
     GetConfig,
-    /// Subscribe to real-time event stream (for TUI)
-    Subscribe,
     /// Request daemon shutdown
     Shutdown,
 }
@@ -51,8 +49,6 @@ pub enum IpcResponse {
     CleanupResult { cleaned: u32, failed: u32 },
     /// Current daemon configuration
     Config(Config),
-    /// Subscription confirmed
-    Subscribed,
     /// Generic success
     Ok,
     /// Error with message

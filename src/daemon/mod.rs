@@ -179,8 +179,6 @@ impl Daemon {
 
             IpcMessage::GetConfig => IpcResponse::Config(self.config.clone()),
 
-            IpcMessage::Subscribe => IpcResponse::Subscribed,
-
             IpcMessage::Shutdown => {
                 tracing::info!("Shutdown requested via IPC");
                 let _ = self.shutdown_tx.send(true);

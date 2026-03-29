@@ -144,7 +144,7 @@ cargo clippy -- -D warnings && cargo test
 
 ---
 
-## Phase E: Low Priority Cleanup (4 items, optional)
+## Phase E: Low Priority Cleanup (4 items, optional) ✅ DONE (v0.6.0)
 
 ### Items
 

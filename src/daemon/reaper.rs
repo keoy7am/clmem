@@ -131,6 +131,12 @@ impl Reaper {
     async fn terminate_gracefully(&self, pid: u32) -> bool {
         tracing::debug!(pid, "Attempting graceful termination");
 
+        // Re-verify process is still alive before acting (mitigate PID recycling)
+        if !self.platform.is_process_alive(pid) {
+            tracing::warn!(pid, "Process already dead before termination, skipping");
+            return true;
+        }
+
         // Step 1: Send SIGTERM / TerminateProcess
         if let Err(e) = self.platform.terminate_process(pid) {
             tracing::warn!(pid, error = %e, "Terminate signal failed");
@@ -156,7 +162,13 @@ impl Reaper {
             }
         }
 
-        // Step 3: Force kill the process tree
+        // Step 3: Re-verify before force kill (mitigate PID recycling during grace period)
+        if !self.platform.is_process_alive(pid) {
+            tracing::debug!(pid, "Process exited during grace period");
+            let _ = self.platform.release_memory(pid);
+            return true;
+        }
+
         tracing::info!(pid, "Grace period expired, force killing process tree");
         if let Err(e) = self.platform.kill_process_tree(pid) {
             tracing::warn!(pid, error = %e, "Process tree kill failed");

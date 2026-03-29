@@ -88,17 +88,34 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Validate and clamp configuration values to safe ranges.
+    pub fn validate(&mut self) {
+        if self.scan_interval_ms < 100 {
+            tracing::warn!(value = self.scan_interval_ms, "scan_interval_ms too low, clamping to 100");
+            self.scan_interval_ms = 100;
+        }
+        if self.leak_check_interval_secs < 5 {
+            tracing::warn!(value = self.leak_check_interval_secs, "leak_check_interval_secs too low, clamping to 5");
+            self.leak_check_interval_secs = 5;
+        }
+        if self.orphan_grace_period_secs > 3600 {
+            tracing::warn!(value = self.orphan_grace_period_secs, "orphan_grace_period_secs too high, clamping to 3600");
+            self.orphan_grace_period_secs = 3600;
+        }
+    }
+
     /// Load configuration from the platform-appropriate config directory.
     /// Falls back to defaults if the config file does not exist.
     pub fn load() -> anyhow::Result<Self> {
         let path = Self::config_path()?;
-        if path.exists() {
+        let mut config = if path.exists() {
             let content = std::fs::read_to_string(&path)?;
-            let config: Config = toml::from_str(&content)?;
-            Ok(config)
+            toml::from_str(&content)?
         } else {
-            Ok(Config::default())
-        }
+            Config::default()
+        };
+        config.validate();
+        Ok(config)
     }
 
     /// Return the platform-appropriate path for the config file.

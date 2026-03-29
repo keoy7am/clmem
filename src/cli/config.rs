@@ -39,9 +39,17 @@ fn config_edit() -> Result<()> {
         }
     });
 
+    let parts: Vec<&str> = editor.split_whitespace().collect();
+    if parts.is_empty() {
+        anyhow::bail!("EDITOR environment variable is empty");
+    }
+
     println!("Opening {} with {}...", path.display(), editor);
 
-    let status = std::process::Command::new(&editor).arg(&path).status()?;
+    let status = std::process::Command::new(parts[0])
+        .args(&parts[1..])
+        .arg(&path)
+        .status()?;
 
     if !status.success() {
         anyhow::bail!("Editor exited with status: {}", status);

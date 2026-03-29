@@ -241,10 +241,12 @@ impl App {
             return;
         }
 
-        // Detail overlay intercepts all keys except q and Esc
+        // Detail overlay intercepts all keys except q, Esc, and d (toggle)
         if self.show_detail {
             match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => self.show_detail = false,
+                KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('d') => {
+                    self.show_detail = false;
+                }
                 _ => {}
             }
             return;

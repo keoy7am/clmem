@@ -7,6 +7,8 @@ use ratatui::{
     Frame,
 };
 
+use std::borrow::Cow;
+
 use crate::models::{ProcessInfo, ProcessState};
 
 use super::format_bytes;
@@ -186,20 +188,27 @@ impl ProcessListPanel {
 
     fn sort_processes(&self, processes: &mut [ProcessInfo]) {
         let asc = self.sort_ascending;
-        processes.sort_by(|a, b| {
-            let ord = match self.sort_column {
-                SortColumn::Pid => a.pid.cmp(&b.pid),
-                SortColumn::Name => a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()),
-                SortColumn::Rss => a.memory.rss_bytes.cmp(&b.memory.rss_bytes),
-                SortColumn::Vms => a.memory.vms_bytes.cmp(&b.memory.vms_bytes),
-                SortColumn::State => state_order(a.state).cmp(&state_order(b.state)),
-            };
-            if asc {
-                ord
-            } else {
-                ord.reverse()
+        if matches!(self.sort_column, SortColumn::Name) {
+            processes.sort_by_cached_key(|p| p.name.to_ascii_lowercase());
+            if !asc {
+                processes.reverse();
             }
-        });
+        } else {
+            processes.sort_by(|a, b| {
+                let ord = match self.sort_column {
+                    SortColumn::Pid => a.pid.cmp(&b.pid),
+                    SortColumn::Name => unreachable!(),
+                    SortColumn::Rss => a.memory.rss_bytes.cmp(&b.memory.rss_bytes),
+                    SortColumn::Vms => a.memory.vms_bytes.cmp(&b.memory.vms_bytes),
+                    SortColumn::State => state_order(a.state).cmp(&state_order(b.state)),
+                };
+                if asc {
+                    ord
+                } else {
+                    ord.reverse()
+                }
+            });
+        }
     }
 }
 
@@ -237,12 +246,12 @@ fn format_duration(secs: u64) -> String {
 }
 
 /// Truncate a name to fit within a column width.
-fn truncate_name(name: &str, max_len: usize) -> String {
+fn truncate_name(name: &str, max_len: usize) -> Cow<'_, str> {
     if name.chars().count() <= max_len {
-        name.to_string()
+        Cow::Borrowed(name)
     } else {
         let truncated: String = name.chars().take(max_len.saturating_sub(3)).collect();
-        format!("{truncated}...")
+        Cow::Owned(format!("{truncated}..."))
     }
 }
 

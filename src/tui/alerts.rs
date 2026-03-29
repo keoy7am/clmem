@@ -83,8 +83,9 @@ impl AlertsPanel {
         }
 
         // Trim to max alerts
-        while self.alerts.len() > self.max_alerts {
-            self.alerts.pop_front();
+        if self.alerts.len() > self.max_alerts {
+            let excess = self.alerts.len() - self.max_alerts;
+            self.alerts.drain(..excess);
         }
     }
 
@@ -96,8 +97,9 @@ impl AlertsPanel {
             level,
             message,
         });
-        while self.alerts.len() > self.max_alerts {
-            self.alerts.pop_front();
+        if self.alerts.len() > self.max_alerts {
+            let excess = self.alerts.len() - self.max_alerts;
+            self.alerts.drain(..excess);
         }
     }
 

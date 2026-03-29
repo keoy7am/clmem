@@ -180,18 +180,52 @@ impl Platform for WindowsPlatform {
         }
     }
 
-    fn has_active_tty(&self, _pid: u32) -> Result<bool> {
-        // Windows: check if process has a console window attached.
-        // Full implementation will use Win32 GetConsoleWindow / AttachConsole.
-        // Stub returns false -- daemon scanner will refine this.
-        Ok(false)
+    fn has_active_tty(&self, pid: u32) -> Result<bool> {
+        use windows::Win32::System::Console::{AttachConsole, FreeConsole};
+
+        // AttachConsole modifies global per-process state, so we serialize it
+        // via the system mutex. The daemon is typically a background process
+        // without its own console, so temporarily changing console attachment
+        // is safe.
+        let sys = self
+            .system
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+
+        // Safety: AttachConsole/FreeConsole are Win32 APIs with no memory
+        // unsafety. The global console state change is serialized by the mutex.
+        unsafe {
+            // Detach from our current console (no-op if none attached)
+            let _ = FreeConsole();
+
+            // Try to attach to the target process's console
+            if AttachConsole(pid).is_ok() {
+                let _ = FreeConsole();
+                return Ok(true);
+            }
+        }
+
+        // AttachConsole failed: target has no console, or access denied.
+        // Fall back to parent-terminal heuristic.
+        if let Some(proc) = sys.process(Pid::from_u32(pid)) {
+            Ok(check_parent_terminal(&sys, proc))
+        } else {
+            Ok(false)
+        }
     }
 
     fn has_active_ipc(&self, _pid: u32) -> Result<bool> {
-        // Check if process has open Named Pipe handles related to clmem.
-        // Full implementation will use NtQuerySystemInformation.
-        // Stub returns false -- daemon scanner will refine this.
-        Ok(false)
+        // Per-PID named pipe handle detection requires NtQuerySystemInformation
+        // (undocumented). Instead, check if the daemon pipe exists by briefly
+        // connecting as a client. If the daemon is running, conservatively
+        // return true to prevent premature orphan classification — the process
+        // might have an active IPC connection we cannot verify from outside.
+        let pipe_exists = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(r"\\.\pipe\clmem")
+            .is_ok();
+        Ok(pipe_exists)
     }
 
     fn terminate_process(&self, pid: u32) -> Result<()> {

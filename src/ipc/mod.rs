@@ -6,15 +6,53 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 /// Get the default IPC path for this platform.
+///
+/// On Unix this resolves to `<runtime_dir>/clmem.sock` via the Platform
+/// trait, then validates that the directory is owned by the current user
+/// and is not world-writable.  On Windows the path is the fixed named
+/// pipe `\\.\pipe\clmem`, which is not subject to filesystem hijacking.
 pub fn default_ipc_path() -> PathBuf {
     #[cfg(unix)]
     {
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(runtime_dir).join("clmem.sock")
+        let dir = crate::platform::create_platform().runtime_dir();
+        validate_runtime_dir_unix(&dir);
+        dir.join("clmem.sock")
     }
     #[cfg(windows)]
     {
         PathBuf::from(r"\\.\pipe\clmem")
+    }
+}
+
+/// On Unix, warn if the runtime directory is not owned by us or is
+/// world-writable.  We log warnings rather than hard-failing so the
+/// daemon can still start on unusual setups.
+#[cfg(unix)]
+fn validate_runtime_dir_unix(dir: &Path) {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = match std::fs::metadata(dir) {
+        Ok(m) => m,
+        Err(_) => return, // directory may not exist yet; daemon will create it
+    };
+
+    let uid = unsafe { libc::getuid() };
+    if meta.uid() != uid {
+        tracing::warn!(
+            dir = %dir.display(),
+            owner = meta.uid(),
+            expected = uid,
+            "IPC runtime directory is not owned by current user"
+        );
+    }
+
+    // Check world-writable bit (o+w = 0o002)
+    if meta.mode() & 0o002 != 0 {
+        tracing::warn!(
+            dir = %dir.display(),
+            mode = format!("{:o}", meta.mode()),
+            "IPC runtime directory is world-writable"
+        );
     }
 }
 

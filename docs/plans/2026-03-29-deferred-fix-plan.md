@@ -18,7 +18,7 @@ The original `2026-03-29-review-fix-plan.md` (Phase 1–5) is **complete**:
 
 ---
 
-## Phase A: IPC Server Extraction (5 items, 1 session)
+## Phase A: IPC Server Extraction (5 items, 1 session) ✅ DONE (v0.5.0)
 
 **Goal**: Move IPC server code from daemon/ to ipc/, eliminate all cfg in daemon/.
 
@@ -58,7 +58,7 @@ cargo clippy -- -D warnings && cargo test
 
 ---
 
-## Phase B: IPC Protocol Consolidation (1 item, 1 session)
+## Phase B: IPC Protocol Consolidation (1 item, 1 session) ✅ DONE (v0.5.1)
 
 **Goal**: Reduce TUI→daemon IPC from 4 round-trips to 1.
 

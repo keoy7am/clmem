@@ -116,7 +116,7 @@ cargo clippy -- -D warnings && cargo test
 
 ---
 
-## Phase D: Windows FFI (1 item, 1 session)
+## Phase D: Windows FFI (1 item, 1 session) ✅ DONE (v0.5.3)
 
 **Goal**: Implement real TTY/IPC detection on Windows.
 

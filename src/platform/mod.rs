@@ -148,7 +148,14 @@ pub(crate) fn build_process_info(
     parent_exists: bool,
 ) -> ProcessInfo {
     let started_at = chrono::DateTime::from_timestamp(start_time_epoch as i64, 0)
-        .unwrap_or_else(chrono::Utc::now);
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                pid,
+                start_time_epoch,
+                "Invalid process start_time, falling back to UNIX epoch"
+            );
+            chrono::DateTime::UNIX_EPOCH
+        });
     let last_activity = if cpu_usage > 0.0 {
         chrono::Utc::now()
     } else {

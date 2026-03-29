@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use chrono::Utc;
 use ratatui::{
@@ -42,6 +42,12 @@ pub struct ProcessListPanel {
     filter: String,
     /// True when the user is typing into the filter input.
     pub filter_active: bool,
+    /// Previous RSS values per PID for delta computation.
+    previous_rss: HashMap<u32, u64>,
+    /// RSS deltas (current - previous) per PID, computed each update cycle.
+    rss_deltas: HashMap<u32, i64>,
+    /// RSS history for sparkline rendering (last 20 samples per PID).
+    rss_history: HashMap<u32, VecDeque<u64>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -68,13 +74,46 @@ impl ProcessListPanel {
             show_cmdline: true,
             filter: String::new(),
             filter_active: false,
+            previous_rss: HashMap::new(),
+            rss_deltas: HashMap::new(),
+            rss_history: HashMap::new(),
         }
     }
 
     pub fn update(&mut self, processes: Vec<ProcessInfo>) {
         let selected_pid = self.selected_process().map(|p| p.pid);
 
+        // Compute RSS deltas before replacing raw_processes
+        let current_pids: HashSet<u32> = processes.iter().map(|p| p.pid).collect();
+        self.rss_deltas.clear();
+        for p in &processes {
+            if let Some(&prev) = self.previous_rss.get(&p.pid) {
+                self.rss_deltas
+                    .insert(p.pid, p.memory.rss_bytes as i64 - prev as i64);
+            }
+            // else: first observation, no delta entry → will show "--"
+        }
+        // Store current RSS for next cycle
+        self.previous_rss.clear();
+        for p in &processes {
+            self.previous_rss.insert(p.pid, p.memory.rss_bytes);
+        }
         self.raw_processes = processes;
+
+        // Update RSS history for sparkline (clean up departed PIDs)
+        self.rss_history
+            .retain(|pid, _| current_pids.contains(pid));
+        for p in &self.raw_processes {
+            let history = self
+                .rss_history
+                .entry(p.pid)
+                .or_insert_with(|| VecDeque::with_capacity(20));
+            history.push_back(p.memory.rss_bytes);
+            if history.len() > 20 {
+                history.pop_front();
+            }
+        }
+
         self.rebuild_display_list();
 
         if self.display_list.is_empty() {
@@ -178,7 +217,7 @@ impl ProcessListPanel {
         };
 
         let cmd_header = if self.show_cmdline { "Command" } else { "Name" };
-        let header_cells = ["PID", cmd_header, "RSS", "VMS", "State", "Uptime"]
+        let header_cells = ["PID", cmd_header, "RSS", "Delta", "VMS", "Trend", "State", "Uptime"]
             .into_iter()
             .map(|h| {
                 Cell::from(Span::styled(
@@ -219,11 +258,39 @@ impl ProcessListPanel {
                 cmd_text
             };
 
+            // RSS delta
+            let delta = self.rss_deltas.get(&p.pid).copied();
+            let (delta_text, delta_color) = match delta {
+                Some(d) => format_delta(d),
+                None => ("--".to_string(), Color::DarkGray),
+            };
+
+            // Get sparkline for this process
+            let sparkline_text = self
+                .rss_history
+                .get(&p.pid)
+                .map(render_sparkline)
+                .unwrap_or_default();
+
             Row::new(vec![
                 Cell::from(p.pid.to_string()),
                 Cell::from(cmd_display),
-                Cell::from(format_bytes(p.memory.rss_bytes)),
-                Cell::from(format_bytes(p.memory.vms_bytes)),
+                Cell::from(Span::styled(
+                    format_bytes(p.memory.rss_bytes),
+                    Style::default().fg(rss_color(p.memory.rss_bytes)),
+                )),
+                Cell::from(Span::styled(
+                    delta_text,
+                    Style::default().fg(delta_color),
+                )),
+                Cell::from(Span::styled(
+                    format_bytes(p.memory.vms_bytes),
+                    Style::default().fg(vms_color(p.memory.vms_bytes)),
+                )),
+                Cell::from(Span::styled(
+                    sparkline_text,
+                    Style::default().fg(Color::Cyan),
+                )),
                 Cell::from(Span::styled(
                     p.state.to_string(),
                     Style::default()
@@ -235,12 +302,14 @@ impl ProcessListPanel {
         });
 
         let widths = [
-            ratatui::layout::Constraint::Length(8),
-            ratatui::layout::Constraint::Min(40),
-            ratatui::layout::Constraint::Length(10),
-            ratatui::layout::Constraint::Length(10),
-            ratatui::layout::Constraint::Length(8),
-            ratatui::layout::Constraint::Length(10),
+            ratatui::layout::Constraint::Length(8),  // PID
+            ratatui::layout::Constraint::Min(40),    // Command/Name
+            ratatui::layout::Constraint::Length(10), // RSS
+            ratatui::layout::Constraint::Length(10), // Delta
+            ratatui::layout::Constraint::Length(10), // VMS
+            ratatui::layout::Constraint::Length(12), // Trend
+            ratatui::layout::Constraint::Length(8),  // State
+            ratatui::layout::Constraint::Length(10), // Uptime
         ];
 
         let mode_tag = if self.tree_mode && self.filter.is_empty() {
@@ -316,6 +385,40 @@ impl ProcessListPanel {
             None => 0,
         };
         self.state.select(Some(i));
+    }
+
+    /// Move selection up by one page.
+    pub fn select_page_up(&mut self, page_size: usize) {
+        if self.display_list.is_empty() {
+            return;
+        }
+        let current = self.state.selected().unwrap_or(0);
+        let new_idx = current.saturating_sub(page_size);
+        self.state.select(Some(new_idx));
+    }
+
+    /// Move selection down by one page.
+    pub fn select_page_down(&mut self, page_size: usize) {
+        if self.display_list.is_empty() {
+            return;
+        }
+        let current = self.state.selected().unwrap_or(0);
+        let new_idx = (current + page_size).min(self.display_list.len() - 1);
+        self.state.select(Some(new_idx));
+    }
+
+    /// Jump to the first item.
+    pub fn select_first(&mut self) {
+        if !self.display_list.is_empty() {
+            self.state.select(Some(0));
+        }
+    }
+
+    /// Jump to the last item.
+    pub fn select_last(&mut self) {
+        if !self.display_list.is_empty() {
+            self.state.select(Some(self.display_list.len() - 1));
+        }
     }
 
     pub fn selected_process(&self) -> Option<&ProcessInfo> {
@@ -549,6 +652,71 @@ fn sort_processes_flat(processes: &mut [ProcessInfo], col: SortColumn, asc: bool
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Render a mini sparkline from RSS history using block characters.
+fn render_sparkline(history: &VecDeque<u64>) -> String {
+    if history.is_empty() {
+        return String::new();
+    }
+    let bars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let min_val = history.iter().copied().min().unwrap_or(0);
+    let max_val = history.iter().copied().max().unwrap_or(1);
+    let range = max_val.saturating_sub(min_val).max(1);
+    history
+        .iter()
+        .map(|&v| {
+            let normalized = v.saturating_sub(min_val);
+            let idx = ((normalized as f64 / range as f64) * 7.0) as usize;
+            bars[idx.min(7)]
+        })
+        .collect()
+}
+
+/// Format an RSS delta value into a human-readable string with color.
+fn format_delta(delta: i64) -> (String, Color) {
+    if delta == 0 {
+        return ("--".to_string(), Color::DarkGray);
+    }
+    let abs_bytes = delta.unsigned_abs();
+    let (value, unit) = if abs_bytes >= 1024 * 1024 {
+        (abs_bytes as f64 / (1024.0 * 1024.0), "MB")
+    } else if abs_bytes >= 1024 {
+        (abs_bytes as f64 / 1024.0, "KB")
+    } else {
+        (abs_bytes as f64, "B")
+    };
+    if delta > 0 {
+        (format!("+{:.1} {}", value, unit), Color::Red)
+    } else {
+        (format!("-{:.1} {}", value, unit), Color::Green)
+    }
+}
+
+/// Color for RSS cell based on memory usage.
+fn rss_color(bytes: u64) -> Color {
+    const MB50: u64 = 50 * 1024 * 1024;
+    const MB200: u64 = 200 * 1024 * 1024;
+    if bytes < MB50 {
+        Color::Green
+    } else if bytes <= MB200 {
+        Color::Yellow
+    } else {
+        Color::Red
+    }
+}
+
+/// Color for VMS cell based on virtual memory usage.
+fn vms_color(bytes: u64) -> Color {
+    const GB1: u64 = 1024 * 1024 * 1024;
+    const GB5: u64 = 5 * GB1;
+    if bytes < GB1 {
+        Color::Green
+    } else if bytes <= GB5 {
+        Color::Yellow
+    } else {
+        Color::Red
+    }
+}
 
 /// Map process state to color.
 fn state_color(state: ProcessState) -> Color {

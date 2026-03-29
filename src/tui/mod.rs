@@ -236,9 +236,34 @@ impl App {
             return;
         }
 
+        // Filter input mode: most keys go to the filter string
+        if self.process_list.filter_active {
+            match key.code {
+                KeyCode::Esc => self.process_list.cancel_filter(),
+                KeyCode::Enter => {
+                    // Accept filter and exit filter input mode
+                    self.process_list.filter_active = false;
+                }
+                KeyCode::Backspace => self.process_list.filter_pop(),
+                KeyCode::Char(ch) => self.process_list.filter_push(ch),
+                // Allow navigation while filtering
+                KeyCode::Up => self.process_list.select_prev(),
+                KeyCode::Down => self.process_list.select_next(),
+                _ => {}
+            }
+            return;
+        }
+
         match key.code {
             // Quit
-            KeyCode::Char('q') | KeyCode::Esc => self.running = false,
+            KeyCode::Char('q') | KeyCode::Esc => {
+                // If filter is active (accepted but still showing), clear it first
+                if self.process_list.has_active_filter() {
+                    self.process_list.cancel_filter();
+                } else {
+                    self.running = false;
+                }
+            }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.running = false;
             }
@@ -283,6 +308,15 @@ impl App {
 
             // Toggle tree/flat view
             KeyCode::Char('t') => self.process_list.toggle_tree_mode(),
+
+            // Toggle name/cmdline display
+            KeyCode::Char('c') => self.process_list.toggle_cmdline(),
+
+            // Start filter (like htop F4)
+            KeyCode::Char('/') => {
+                self.active_panel = Panel::ProcessList;
+                self.process_list.start_filter();
+            }
 
             // Sort columns (number keys)
             KeyCode::Char('1') => self.process_list.sort_by(process_list::SortColumn::Pid),
@@ -478,14 +512,22 @@ impl App {
             Span::raw("  "),
             Span::styled(status_msg, Style::default().fg(Color::Yellow)),
             Span::raw("  "),
-            Span::styled(
-                if self.active_panel == Panel::ProcessList && self.process_list.is_tree_mode() {
-                    "?: help  q: quit  Tab: switch  Enter: expand/collapse  t: tree/flat"
-                } else {
-                    "?: help  q: quit  Tab: switch panel"
-                },
-                Style::default().fg(Color::DarkGray),
-            ),
+            if self.process_list.filter_active {
+                Span::styled(
+                    format!("Filter: {}_ (Enter: accept  Esc: cancel)", self.process_list.filter_text()),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )
+            } else if self.active_panel == Panel::ProcessList {
+                Span::styled(
+                    "?: help  q: quit  Tab: switch  /: filter  c: name/cmd  t: tree/flat",
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                Span::styled(
+                    "?: help  q: quit  Tab: switch panel",
+                    Style::default().fg(Color::DarkGray),
+                )
+            },
         ]);
 
         frame.render_widget(Paragraph::new(line), area);
@@ -533,6 +575,8 @@ impl App {
             Line::from("  K           Kill selected process"),
             Line::from("  r           Refresh data"),
             Line::from("  t           Toggle tree/flat view"),
+            Line::from("  c           Toggle name/command"),
+            Line::from("  /           Filter processes"),
             Line::from("  1-5         Sort by column"),
             Line::from("  ?           Toggle this help"),
             Line::from(""),

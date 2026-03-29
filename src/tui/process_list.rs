@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
@@ -37,6 +36,12 @@ pub struct ProcessListPanel {
     tree_mode: bool,
     /// PIDs whose children are collapsed (hidden) in tree view.
     collapsed: HashSet<u32>,
+    /// When true, show full cmdline; when false, show process name only.
+    show_cmdline: bool,
+    /// Active filter string (empty = no filter). Matches against name and cmdline.
+    filter: String,
+    /// True when the user is typing into the filter input.
+    pub filter_active: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,6 +65,9 @@ impl ProcessListPanel {
             sort_ascending: false,
             tree_mode: true,
             collapsed: HashSet::new(),
+            show_cmdline: true,
+            filter: String::new(),
+            filter_active: false,
         }
     }
 
@@ -120,17 +128,35 @@ impl ProcessListPanel {
         }
     }
 
-    /// Rebuild the display list from raw_processes using current tree_mode and sort settings.
+    /// Rebuild the display list from raw_processes using current tree_mode,
+    /// sort settings, and filter.
     fn rebuild_display_list(&mut self) {
-        if self.tree_mode {
+        // Apply filter first
+        let source: Vec<ProcessInfo> = if self.filter.is_empty() {
+            self.raw_processes.clone()
+        } else {
+            let needle = self.filter.to_ascii_lowercase();
+            self.raw_processes
+                .iter()
+                .filter(|p| {
+                    p.name.to_ascii_lowercase().contains(&needle)
+                        || p.cmdline.to_ascii_lowercase().contains(&needle)
+                        || p.pid.to_string().contains(&needle)
+                })
+                .cloned()
+                .collect()
+        };
+
+        if self.tree_mode && self.filter.is_empty() {
+            // Tree mode only when not filtering (filter flattens to show matches)
             self.display_list = build_tree_list(
-                &self.raw_processes,
+                &source,
                 self.sort_column,
                 self.sort_ascending,
                 &self.collapsed,
             );
         } else {
-            let mut flat = self.raw_processes.clone();
+            let mut flat = source;
             sort_processes_flat(&mut flat, self.sort_column, self.sort_ascending);
             self.display_list = flat
                 .into_iter()
@@ -151,7 +177,8 @@ impl ProcessListPanel {
             Color::DarkGray
         };
 
-        let header_cells = ["PID", "Command", "RSS", "VMS", "State", "Uptime"]
+        let cmd_header = if self.show_cmdline { "Command" } else { "Name" };
+        let header_cells = ["PID", cmd_header, "RSS", "VMS", "State", "Uptime"]
             .into_iter()
             .map(|h| {
                 Cell::from(Span::styled(
@@ -169,8 +196,12 @@ impl ProcessListPanel {
             let state_color = state_color(p.state);
             let uptime = format_duration((now - p.started_at).num_seconds().max(0) as u64);
 
-            // Build the command display string (like htop: show cmdline)
-            let cmd_text = format_command(&p.name, &p.cmdline);
+            // Build the command display string
+            let cmd_text = if self.show_cmdline {
+                format_command(&p.name, &p.cmdline)
+            } else {
+                p.name.clone()
+            };
 
             let cmd_display = if self.tree_mode && d.depth > 0 {
                 let indent = "  ".repeat((d.depth - 1) as usize);
@@ -212,17 +243,32 @@ impl ProcessListPanel {
             ratatui::layout::Constraint::Length(10),
         ];
 
-        let mode_tag = if self.tree_mode { "tree" } else { "flat" };
+        let mode_tag = if self.tree_mode && self.filter.is_empty() {
+            "tree"
+        } else {
+            "flat"
+        };
+        let filter_tag = if self.filter.is_empty() {
+            String::new()
+        } else {
+            format!(" [filter: {}]", self.filter)
+        };
         let table = Table::new(rows, widths)
             .header(header)
             .block(
                 Block::default()
                     .title(format!(
-                        " Processes ({}) [{}] [sort: {:?} {}] ",
-                        self.raw_processes.len(),
+                        " Processes ({}{}) [{}] [sort: {:?} {}]{} ",
+                        self.display_list.len(),
+                        if self.display_list.len() != self.raw_processes.len() {
+                            format!("/{}", self.raw_processes.len())
+                        } else {
+                            String::new()
+                        },
                         mode_tag,
                         self.sort_column,
-                        if self.sort_ascending { "▲" } else { "▼" }
+                        if self.sort_ascending { "▲" } else { "▼" },
+                        filter_tag,
                     ))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(border_color)),
@@ -279,8 +325,46 @@ impl ProcessListPanel {
             .map(|d| &d.info)
     }
 
-    pub fn is_tree_mode(&self) -> bool {
-        self.tree_mode
+    /// Toggle between showing full cmdline and name-only.
+    pub fn toggle_cmdline(&mut self) {
+        self.show_cmdline = !self.show_cmdline;
+    }
+
+    // -- Filter API ----------------------------------------------------------
+
+    /// Start filter input mode.
+    pub fn start_filter(&mut self) {
+        self.filter_active = true;
+    }
+
+    /// Cancel filter input and clear the filter.
+    pub fn cancel_filter(&mut self) {
+        self.filter_active = false;
+        if !self.filter.is_empty() {
+            self.filter.clear();
+            self.rebuild_display_list();
+        }
+    }
+
+    /// Append a character to the filter string.
+    pub fn filter_push(&mut self, ch: char) {
+        self.filter.push(ch);
+        self.rebuild_display_list();
+    }
+
+    /// Remove the last character from the filter string.
+    pub fn filter_pop(&mut self) {
+        self.filter.pop();
+        self.rebuild_display_list();
+    }
+
+    /// Return the current filter string (for status bar display).
+    pub fn filter_text(&self) -> &str {
+        &self.filter
+    }
+
+    pub fn has_active_filter(&self) -> bool {
+        !self.filter.is_empty()
     }
 
     pub fn sort_by(&mut self, col: SortColumn) {
@@ -496,16 +580,6 @@ fn format_duration(secs: u64) -> String {
         let h = secs / 3600;
         let m = (secs % 3600) / 60;
         format!("{h}h {m}m")
-    }
-}
-
-/// Truncate a name to fit within a column width.
-fn _truncate_name(name: &str, max_len: usize) -> Cow<'_, str> {
-    if name.chars().count() <= max_len {
-        Cow::Borrowed(name)
-    } else {
-        let truncated: String = name.chars().take(max_len.saturating_sub(3)).collect();
-        Cow::Owned(format!("{truncated}..."))
     }
 }
 

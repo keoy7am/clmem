@@ -21,6 +21,92 @@ impl MacosPlatform {
     }
 }
 
+/// Check if a process has an active TTY by inspecting parent process name.
+/// Takes &System directly to avoid re-locking (fixes potential deadlock).
+fn check_active_tty(sys: &System, pid: u32) -> bool {
+    let pid_sysinfo = Pid::from_u32(pid);
+    if let Some(proc) = sys.process(pid_sysinfo) {
+        if let Some(parent_pid) = proc.parent() {
+            if let Some(parent) = sys.process(parent_pid) {
+                let parent_name = parent.name().to_string_lossy().to_ascii_lowercase();
+                return parent_name.contains("terminal")
+                    || parent_name.contains("iterm")
+                    || parent_name.contains("alacritty")
+                    || parent_name.contains("kitty")
+                    || parent_name.contains("warp")
+                    || parent_name.contains("hyper")
+                    || parent_name.contains("bash")
+                    || parent_name.contains("zsh")
+                    || parent_name.contains("fish")
+                    || parent_name.contains("tmux")
+                    || parent_name.contains("screen");
+            }
+        }
+    }
+    false
+}
+
+/// Enumerate Claude processes from an already-locked System reference.
+/// Shared by list_claude_processes and take_snapshot to avoid double-locking.
+fn enumerate_claude_processes(sys: &System) -> Vec<ProcessInfo> {
+    let mut result = Vec::new();
+    for (pid, proc) in sys.processes() {
+        let name = proc.name().to_string_lossy().to_string();
+        let raw_cmdline = cmd_to_string(proc.cmd());
+        if !is_claude_process(&name, &raw_cmdline) {
+            continue;
+        }
+        let cmdline = super::redact_sensitive_args(&raw_cmdline);
+
+        let memory = MemoryUsage {
+            rss_bytes: proc.memory(),
+            vms_bytes: proc.virtual_memory(),
+            swap_bytes: 0,
+            committed_bytes: 0,
+        };
+
+        // Use sysinfo start_time (seconds since UNIX epoch)
+        let started_at = {
+            let epoch_secs = proc.start_time() as i64;
+            chrono::DateTime::from_timestamp(epoch_secs, 0).unwrap_or_else(Utc::now)
+        };
+
+        // Estimate last_activity from CPU usage: if cpu > 0, active now
+        // Scanner will refine this by tracking CPU time changes
+        let last_activity = if proc.cpu_usage() > 0.0 {
+            Utc::now()
+        } else {
+            started_at
+        };
+
+        let has_tty = check_active_tty(sys, pid.as_u32());
+        let has_ipc = false; // macOS lacks /proc; TODO: implement via proc_pidinfo
+
+        // ACTIVE checked FIRST (safety rule: ACTIVE -> NEVER touch)
+        let state = if has_tty {
+            ProcessState::Active
+        } else if proc.parent().is_none() && !has_ipc {
+            ProcessState::Orphan
+        } else {
+            ProcessState::Idle
+        };
+
+        result.push(ProcessInfo {
+            pid: pid.as_u32(),
+            parent_pid: proc.parent().map(|p| p.as_u32()),
+            name,
+            cmdline,
+            state,
+            memory,
+            started_at,
+            last_activity,
+            has_tty,
+            has_ipc,
+        });
+    }
+    result
+}
+
 impl Platform for MacosPlatform {
     fn list_claude_processes(&self) -> Result<Vec<ProcessInfo>> {
         let mut sys = self
@@ -28,73 +114,18 @@ impl Platform for MacosPlatform {
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         sys.refresh_processes(ProcessesToUpdate::All, true);
-
-        let mut result = Vec::new();
-        for (pid, proc) in sys.processes() {
-            let name = proc.name().to_string_lossy().to_string();
-            let raw_cmdline = cmd_to_string(proc.cmd());
-            if !is_claude_process(&name, &raw_cmdline) {
-                continue;
-            }
-            let cmdline = super::redact_sensitive_args(&raw_cmdline);
-
-            let memory = MemoryUsage {
-                rss_bytes: proc.memory(),
-                vms_bytes: proc.virtual_memory(),
-                swap_bytes: 0,
-                committed_bytes: 0,
-            };
-
-            // Use sysinfo start_time (seconds since UNIX epoch)
-            let started_at = {
-                let epoch_secs = proc.start_time() as i64;
-                chrono::DateTime::from_timestamp(epoch_secs, 0).unwrap_or_else(Utc::now)
-            };
-
-            // Estimate last_activity from CPU usage: if cpu > 0, active now
-            // Scanner will refine this by tracking CPU time changes
-            let last_activity = if proc.cpu_usage() > 0.0 {
-                Utc::now()
-            } else {
-                started_at
-            };
-
-            let has_tty = self.has_active_tty(pid.as_u32()).unwrap_or(false);
-            let has_ipc = self.has_active_ipc(pid.as_u32()).unwrap_or(false);
-
-            // ACTIVE checked FIRST (safety rule: ACTIVE → NEVER touch)
-            let state = if has_tty {
-                ProcessState::Active
-            } else if proc.parent().is_none() && !has_ipc {
-                ProcessState::Orphan
-            } else {
-                ProcessState::Idle
-            };
-
-            result.push(ProcessInfo {
-                pid: pid.as_u32(),
-                parent_pid: proc.parent().map(|p| p.as_u32()),
-                name,
-                cmdline,
-                state,
-                memory,
-                started_at,
-                last_activity,
-                has_tty,
-                has_ipc,
-            });
-        }
-        Ok(result)
+        Ok(enumerate_claude_processes(&sys))
     }
 
     fn take_snapshot(&self) -> Result<MemorySnapshot> {
-        let processes = self.list_claude_processes()?;
         let mut sys = self
             .system
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        sys.refresh_processes(ProcessesToUpdate::All, true);
         sys.refresh_memory();
 
+        let processes = enumerate_claude_processes(&sys);
         let total_rss: u64 = processes.iter().map(|p| p.memory.rss_bytes).sum();
         let total_vms: u64 = processes.iter().map(|p| p.memory.vms_bytes).sum();
         let total_swap: u64 = processes.iter().map(|p| p.memory.swap_bytes).sum();
@@ -132,30 +163,9 @@ impl Platform for MacosPlatform {
     }
 
     fn has_active_tty(&self, pid: u32) -> Result<bool> {
-        // On macOS, check if process has a parent that is a known terminal emulator
         let sys = self.system.lock()
             .map_err(|_| anyhow::anyhow!("Failed to acquire system lock"))?;
-        let pid_sysinfo = Pid::from_u32(pid);
-        if let Some(proc) = sys.process(pid_sysinfo) {
-            if let Some(parent_pid) = proc.parent() {
-                if let Some(parent) = sys.process(parent_pid) {
-                    let parent_name = parent.name().to_string_lossy().to_ascii_lowercase();
-                    // Common macOS terminal emulators and shells
-                    return Ok(parent_name.contains("terminal")
-                        || parent_name.contains("iterm")
-                        || parent_name.contains("alacritty")
-                        || parent_name.contains("kitty")
-                        || parent_name.contains("warp")
-                        || parent_name.contains("hyper")
-                        || parent_name.contains("bash")
-                        || parent_name.contains("zsh")
-                        || parent_name.contains("fish")
-                        || parent_name.contains("tmux")
-                        || parent_name.contains("screen"));
-                }
-            }
-        }
-        Ok(false)
+        Ok(check_active_tty(&sys, pid))
     }
 
     fn has_active_ipc(&self, _pid: u32) -> Result<bool> {

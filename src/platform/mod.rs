@@ -64,26 +64,34 @@ pub(crate) fn is_claude_process(name: &str, cmdline: &str) -> bool {
 
 /// Join OsString slices into a single String for matching.
 pub(crate) fn cmd_to_string(cmd: &[std::ffi::OsString]) -> String {
-    cmd.iter()
-        .map(|s| s.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut result = String::new();
+    for (i, s) in cmd.iter().enumerate() {
+        if i > 0 {
+            result.push(' ');
+        }
+        result.push_str(&s.to_string_lossy());
+    }
+    result
 }
 
 /// Collect all descendant PIDs of a root process using BFS traversal.
 /// Returns PIDs in reverse order (children before parents) for safe termination.
 pub(crate) fn collect_process_tree(sys: &sysinfo::System, root_pid: u32) -> Vec<sysinfo::Pid> {
+    use std::collections::HashSet;
     use sysinfo::Pid;
-    let mut to_kill = vec![Pid::from_u32(root_pid)];
-    let mut i = 0;
-    while i < to_kill.len() {
-        let parent = to_kill[i];
+    let root = Pid::from_u32(root_pid);
+    let mut to_kill = vec![root];
+    let mut visited: HashSet<Pid> = HashSet::new();
+    visited.insert(root);
+    let mut queue = vec![root];
+    while let Some(parent) = queue.pop() {
         for (child_pid, proc_info) in sys.processes() {
-            if proc_info.parent() == Some(parent) && !to_kill.contains(child_pid) {
+            if proc_info.parent() == Some(parent) && !visited.contains(child_pid) {
+                visited.insert(*child_pid);
                 to_kill.push(*child_pid);
+                queue.push(*child_pid);
             }
         }
-        i += 1;
     }
     to_kill.reverse();
     to_kill

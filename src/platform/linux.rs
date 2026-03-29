@@ -21,6 +21,95 @@ impl LinuxPlatform {
     }
 }
 
+/// Check if a process has an active TTY via /proc filesystem (no lock needed).
+fn check_active_tty(pid: u32) -> bool {
+    let path = format!("/proc/{}/fd/0", pid);
+    match std::fs::read_link(&path) {
+        Ok(target) => {
+            let target_str = target.to_string_lossy();
+            target_str.starts_with("/dev/pts/") || target_str.starts_with("/dev/tty")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Check if a process has an active IPC connection via /proc filesystem (no lock needed).
+fn check_active_ipc(pid: u32) -> bool {
+    let fd_dir = format!("/proc/{}/fd", pid);
+    if let Ok(entries) = std::fs::read_dir(&fd_dir) {
+        for entry in entries.flatten() {
+            if let Ok(target) = std::fs::read_link(entry.path()) {
+                let s = target.to_string_lossy();
+                if s.contains("clmem") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Enumerate Claude processes from an already-locked System reference.
+/// Shared by list_claude_processes and take_snapshot to avoid double-locking.
+fn enumerate_claude_processes(sys: &System) -> Vec<ProcessInfo> {
+    let mut result = Vec::new();
+    for (pid, proc) in sys.processes() {
+        let name = proc.name().to_string_lossy().to_string();
+        let raw_cmdline = cmd_to_string(proc.cmd());
+        if !is_claude_process(&name, &raw_cmdline) {
+            continue;
+        }
+        let cmdline = super::redact_sensitive_args(&raw_cmdline);
+
+        let memory = MemoryUsage {
+            rss_bytes: proc.memory(),
+            vms_bytes: proc.virtual_memory(),
+            swap_bytes: 0,
+            committed_bytes: 0,
+        };
+
+        // Use sysinfo start_time (seconds since UNIX epoch)
+        let started_at = {
+            let epoch_secs = proc.start_time() as i64;
+            chrono::DateTime::from_timestamp(epoch_secs, 0).unwrap_or_else(Utc::now)
+        };
+
+        // Estimate last_activity from CPU usage: if cpu > 0, active now
+        // Scanner will refine this by tracking CPU time changes
+        let last_activity = if proc.cpu_usage() > 0.0 {
+            Utc::now()
+        } else {
+            started_at
+        };
+
+        let has_tty = check_active_tty(pid.as_u32());
+        let has_ipc = check_active_ipc(pid.as_u32());
+
+        // ACTIVE checked FIRST (safety rule: ACTIVE -> NEVER touch)
+        let state = if has_tty {
+            ProcessState::Active
+        } else if proc.parent().is_none() && !has_ipc {
+            ProcessState::Orphan
+        } else {
+            ProcessState::Idle
+        };
+
+        result.push(ProcessInfo {
+            pid: pid.as_u32(),
+            parent_pid: proc.parent().map(|p| p.as_u32()),
+            name,
+            cmdline,
+            state,
+            memory,
+            started_at,
+            last_activity,
+            has_tty,
+            has_ipc,
+        });
+    }
+    result
+}
+
 impl Platform for LinuxPlatform {
     fn list_claude_processes(&self) -> Result<Vec<ProcessInfo>> {
         let mut sys = self
@@ -28,73 +117,18 @@ impl Platform for LinuxPlatform {
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         sys.refresh_processes(ProcessesToUpdate::All, true);
-
-        let mut result = Vec::new();
-        for (pid, proc) in sys.processes() {
-            let name = proc.name().to_string_lossy().to_string();
-            let raw_cmdline = cmd_to_string(proc.cmd());
-            if !is_claude_process(&name, &raw_cmdline) {
-                continue;
-            }
-            let cmdline = super::redact_sensitive_args(&raw_cmdline);
-
-            let memory = MemoryUsage {
-                rss_bytes: proc.memory(),
-                vms_bytes: proc.virtual_memory(),
-                swap_bytes: 0,
-                committed_bytes: 0,
-            };
-
-            // Use sysinfo start_time (seconds since UNIX epoch)
-            let started_at = {
-                let epoch_secs = proc.start_time() as i64;
-                chrono::DateTime::from_timestamp(epoch_secs, 0).unwrap_or_else(Utc::now)
-            };
-
-            // Estimate last_activity from CPU usage: if cpu > 0, active now
-            // Scanner will refine this by tracking CPU time changes
-            let last_activity = if proc.cpu_usage() > 0.0 {
-                Utc::now()
-            } else {
-                started_at
-            };
-
-            let has_tty = self.has_active_tty(pid.as_u32()).unwrap_or(false);
-            let has_ipc = self.has_active_ipc(pid.as_u32()).unwrap_or(false);
-
-            // ACTIVE checked FIRST (safety rule: ACTIVE → NEVER touch)
-            let state = if has_tty {
-                ProcessState::Active
-            } else if proc.parent().is_none() && !has_ipc {
-                ProcessState::Orphan
-            } else {
-                ProcessState::Idle
-            };
-
-            result.push(ProcessInfo {
-                pid: pid.as_u32(),
-                parent_pid: proc.parent().map(|p| p.as_u32()),
-                name,
-                cmdline,
-                state,
-                memory,
-                started_at,
-                last_activity,
-                has_tty,
-                has_ipc,
-            });
-        }
-        Ok(result)
+        Ok(enumerate_claude_processes(&sys))
     }
 
     fn take_snapshot(&self) -> Result<MemorySnapshot> {
-        let processes = self.list_claude_processes()?;
         let mut sys = self
             .system
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        sys.refresh_processes(ProcessesToUpdate::All, true);
         sys.refresh_memory();
 
+        let processes = enumerate_claude_processes(&sys);
         let total_rss: u64 = processes.iter().map(|p| p.memory.rss_bytes).sum();
         let total_vms: u64 = processes.iter().map(|p| p.memory.vms_bytes).sum();
         let total_swap: u64 = processes.iter().map(|p| p.memory.swap_bytes).sum();
@@ -132,31 +166,11 @@ impl Platform for LinuxPlatform {
     }
 
     fn has_active_tty(&self, pid: u32) -> Result<bool> {
-        // Check /proc/{pid}/fd/0 symlink target
-        let path = format!("/proc/{}/fd/0", pid);
-        match std::fs::read_link(&path) {
-            Ok(target) => {
-                let target_str = target.to_string_lossy();
-                Ok(target_str.starts_with("/dev/pts/") || target_str.starts_with("/dev/tty"))
-            }
-            Err(_) => Ok(false),
-        }
+        Ok(check_active_tty(pid))
     }
 
     fn has_active_ipc(&self, pid: u32) -> Result<bool> {
-        // Check /proc/{pid}/fd for unix socket connections related to clmem
-        let fd_dir = format!("/proc/{}/fd", pid);
-        if let Ok(entries) = std::fs::read_dir(&fd_dir) {
-            for entry in entries.flatten() {
-                if let Ok(target) = std::fs::read_link(entry.path()) {
-                    let s = target.to_string_lossy();
-                    if s.contains("clmem") {
-                        return Ok(true);
-                    }
-                }
-            }
-        }
-        Ok(false)
+        Ok(check_active_ipc(pid))
     }
 
     fn terminate_process(&self, pid: u32) -> Result<()> {

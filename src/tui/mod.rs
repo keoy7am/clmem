@@ -85,6 +85,48 @@ pub struct App {
     poller_stop: Arc<AtomicBool>,
 }
 
+/// Fallback: 4 individual IPC round-trips for older daemons without GetAll.
+fn poll_individual(ipc_path: &std::path::Path) -> IpcData {
+    let mut data = IpcData {
+        snapshot: None,
+        uptime_secs: None,
+        events: Vec::new(),
+        history: Vec::new(),
+        connected: false,
+    };
+
+    match ipc::send_request(ipc_path, &IpcMessage::GetSnapshot) {
+        Ok(IpcResponse::Snapshot(snapshot)) => {
+            data.connected = true;
+            data.snapshot = Some(snapshot);
+        }
+        Ok(_) => {
+            data.connected = true;
+        }
+        Err(_) => return data,
+    }
+
+    if let Ok(IpcResponse::Status { uptime_secs, .. }) =
+        ipc::send_request(ipc_path, &IpcMessage::GetStatus)
+    {
+        data.uptime_secs = Some(uptime_secs);
+    }
+
+    if let Ok(IpcResponse::Events(events)) =
+        ipc::send_request(ipc_path, &IpcMessage::GetEvents { last_n: 50 })
+    {
+        data.events = events;
+    }
+
+    if let Ok(IpcResponse::History(history)) =
+        ipc::send_request(ipc_path, &IpcMessage::GetHistory { last_n: 300 })
+    {
+        data.history = history;
+    }
+
+    data
+}
+
 impl App {
     pub fn new() -> Self {
         Self {
@@ -255,46 +297,38 @@ impl App {
 
         std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                let mut data = IpcData {
-                    snapshot: None,
-                    uptime_secs: None,
-                    events: Vec::new(),
-                    history: Vec::new(),
-                    connected: false,
+                let data = match ipc::send_request(&ipc_path, &IpcMessage::GetAll) {
+                    Ok(IpcResponse::All {
+                        snapshot,
+                        uptime_secs,
+                        events,
+                        history,
+                    }) => IpcData {
+                        snapshot,
+                        uptime_secs: Some(uptime_secs),
+                        events,
+                        history,
+                        connected: true,
+                    },
+                    Ok(IpcResponse::Error(_)) => {
+                        // Fallback: older daemon without GetAll support
+                        poll_individual(&ipc_path)
+                    }
+                    Ok(_) => IpcData {
+                        snapshot: None,
+                        uptime_secs: None,
+                        events: Vec::new(),
+                        history: Vec::new(),
+                        connected: true,
+                    },
+                    Err(_) => IpcData {
+                        snapshot: None,
+                        uptime_secs: None,
+                        events: Vec::new(),
+                        history: Vec::new(),
+                        connected: false,
+                    },
                 };
-
-                match ipc::send_request(&ipc_path, &IpcMessage::GetSnapshot) {
-                    Ok(IpcResponse::Snapshot(snapshot)) => {
-                        data.connected = true;
-                        data.snapshot = Some(snapshot);
-                    }
-                    Ok(_) => {
-                        data.connected = true;
-                    }
-                    Err(_) => {
-                        data.connected = false;
-                    }
-                }
-
-                if data.connected {
-                    if let Ok(IpcResponse::Status { uptime_secs, .. }) =
-                        ipc::send_request(&ipc_path, &IpcMessage::GetStatus)
-                    {
-                        data.uptime_secs = Some(uptime_secs);
-                    }
-
-                    if let Ok(IpcResponse::Events(events)) =
-                        ipc::send_request(&ipc_path, &IpcMessage::GetEvents { last_n: 50 })
-                    {
-                        data.events = events;
-                    }
-
-                    if let Ok(IpcResponse::History(history)) =
-                        ipc::send_request(&ipc_path, &IpcMessage::GetHistory { last_n: 300 })
-                    {
-                        data.history = history;
-                    }
-                }
 
                 let _ = tx.send(data);
                 std::thread::sleep(Duration::from_millis(500));

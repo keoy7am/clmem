@@ -190,6 +190,31 @@ impl Daemon {
 
             IpcMessage::GetConfig => IpcResponse::Config(self.config.clone()),
 
+            IpcMessage::GetAll => {
+                let uptime_secs = Utc::now()
+                    .signed_duration_since(self.start_time)
+                    .num_seconds() as u64;
+
+                let (snapshot, history) = {
+                    let profiler = self.profiler.lock().expect("profiler mutex poisoned");
+                    let snapshot = profiler.get_latest().map(|s| Box::new(s.clone()));
+                    let history = profiler.get_history(300);
+                    (snapshot, history)
+                };
+
+                let events = {
+                    let bus = self.event_bus.lock().await;
+                    bus.get_recent(50)
+                };
+
+                IpcResponse::All {
+                    snapshot,
+                    uptime_secs,
+                    events,
+                    history,
+                }
+            }
+
             IpcMessage::Shutdown => {
                 tracing::info!("Shutdown requested via IPC");
                 let _ = self.shutdown_tx.send(true);

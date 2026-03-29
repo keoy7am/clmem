@@ -23,6 +23,8 @@ pub enum IpcMessage {
     GetConfig,
     /// Request daemon shutdown
     Shutdown,
+    /// Request all TUI data in a single round-trip
+    GetAll,
 }
 
 /// Responses from the daemon back to CLI/TUI.
@@ -51,6 +53,13 @@ pub enum IpcResponse {
     Config(Config),
     /// Generic success
     Ok,
+    /// Compound response for TUI: all data in one round-trip
+    All {
+        snapshot: Option<Box<MemorySnapshot>>,
+        uptime_secs: u64,
+        events: Vec<Event>,
+        history: Vec<MemorySnapshot>,
+    },
     /// Error with message
     Error(String),
 }

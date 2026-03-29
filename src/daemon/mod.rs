@@ -17,7 +17,7 @@ use chrono::Utc;
 use tokio::sync::{watch, Mutex as TokioMutex};
 
 use crate::ipc::{default_ipc_path, IpcMessage, IpcResponse};
-use crate::models::{Config, Event, EventKind};
+use crate::models::{Config, Event, EventKind, MemorySnapshot};
 use crate::platform::{create_platform, Platform};
 
 /// The main daemon orchestrating all monitoring subsystems.
@@ -149,7 +149,7 @@ impl Daemon {
             IpcMessage::GetSnapshot => {
                 let profiler = self.profiler.lock().expect("profiler mutex poisoned");
                 match profiler.get_latest() {
-                    Some(snapshot) => IpcResponse::Snapshot(Box::new(snapshot.clone())),
+                    Some(arc) => IpcResponse::Snapshot(Box::new(MemorySnapshot::clone(&arc))),
                     None => IpcResponse::Error("No snapshots recorded yet".to_string()),
                 }
             }
@@ -197,7 +197,9 @@ impl Daemon {
 
                 let (snapshot, history) = {
                     let profiler = self.profiler.lock().expect("profiler mutex poisoned");
-                    let snapshot = profiler.get_latest().map(|s| Box::new(s.clone()));
+                    let snapshot = profiler
+                        .get_latest()
+                        .map(|arc| Box::new(MemorySnapshot::clone(&arc)));
                     let history = profiler.get_history(300);
                     (snapshot, history)
                 };

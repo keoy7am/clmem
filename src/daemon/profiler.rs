@@ -10,7 +10,7 @@ use crate::platform::Platform;
 /// snapshots (default: 1 hour at 1-second intervals = 3600 entries).
 pub struct Profiler {
     platform: Arc<dyn Platform>,
-    ring_buffer: VecDeque<MemorySnapshot>,
+    ring_buffer: VecDeque<Arc<MemorySnapshot>>,
     max_entries: usize,
 }
 
@@ -29,14 +29,14 @@ impl Profiler {
     }
 
     /// Take a new memory snapshot and store it in the ring buffer.
-    /// Returns a clone of the recorded snapshot.
-    pub fn record(&mut self) -> anyhow::Result<MemorySnapshot> {
-        let snapshot = self.platform.take_snapshot()?;
+    /// Returns an Arc-wrapped snapshot (cheap clone).
+    pub fn record(&mut self) -> anyhow::Result<Arc<MemorySnapshot>> {
+        let snapshot = Arc::new(self.platform.take_snapshot()?);
 
         if self.ring_buffer.len() >= self.max_entries {
             self.ring_buffer.pop_front();
         }
-        self.ring_buffer.push_back(snapshot.clone());
+        self.ring_buffer.push_back(Arc::clone(&snapshot));
 
         tracing::debug!(
             process_count = snapshot.claude_process_count,
@@ -49,14 +49,19 @@ impl Profiler {
     }
 
     /// Return the most recent snapshot, if any.
-    pub fn get_latest(&self) -> Option<&MemorySnapshot> {
-        self.ring_buffer.back()
+    pub fn get_latest(&self) -> Option<Arc<MemorySnapshot>> {
+        self.ring_buffer.back().cloned()
     }
 
     /// Return the last `last_n` snapshots (or all if fewer exist).
+    /// Clones are deep copies for serde serialization over IPC.
     pub fn get_history(&self, last_n: usize) -> Vec<MemorySnapshot> {
         let len = self.ring_buffer.len();
         let start = len.saturating_sub(last_n);
-        self.ring_buffer.iter().skip(start).cloned().collect()
+        self.ring_buffer
+            .iter()
+            .skip(start)
+            .map(|arc| MemorySnapshot::clone(arc))
+            .collect()
     }
 }

@@ -87,6 +87,36 @@ fn enumerate_claude_processes(sys: &System) -> Vec<ProcessInfo> {
     result
 }
 
+/// Build ProcessInfo for a single sysinfo::Process entry (Linux-specific TTY/IPC checks).
+fn build_info_for_process(pid: &Pid, proc: &sysinfo::Process) -> ProcessInfo {
+    let name = proc.name().to_string_lossy().to_string();
+    let raw_cmdline = cmd_to_string(proc.cmd());
+    let cmdline = super::redact_sensitive_args(&raw_cmdline);
+
+    let memory = MemoryUsage {
+        rss_bytes: proc.memory(),
+        vms_bytes: proc.virtual_memory(),
+        swap_bytes: 0,
+        committed_bytes: 0,
+    };
+
+    let has_tty = check_active_tty(pid.as_u32());
+    let has_ipc = check_active_ipc(pid.as_u32());
+
+    build_process_info(
+        pid.as_u32(),
+        proc.parent().map(|p| p.as_u32()),
+        name,
+        cmdline,
+        memory,
+        proc.start_time(),
+        proc.cpu_usage(),
+        has_tty,
+        has_ipc,
+        proc.parent().is_some(),
+    )
+}
+
 impl Platform for LinuxPlatform {
     fn list_claude_processes(&self) -> Result<Vec<ProcessInfo>> {
         let mut sys = self
@@ -95,6 +125,24 @@ impl Platform for LinuxPlatform {
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         sys.refresh_processes(ProcessesToUpdate::All, true);
         Ok(enumerate_claude_processes(&sys))
+    }
+
+    fn refresh_known_processes(&self, pids: &[u32]) -> Result<Vec<ProcessInfo>> {
+        let mut sys = self
+            .system
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        let sysinfo_pids: Vec<Pid> = pids.iter().map(|&p| Pid::from_u32(p)).collect();
+        sys.refresh_processes(ProcessesToUpdate::Some(&sysinfo_pids), true);
+
+        let mut result = Vec::with_capacity(pids.len());
+        for &pid in pids {
+            let sysinfo_pid = Pid::from_u32(pid);
+            if let Some(proc) = sys.process(sysinfo_pid) {
+                result.push(build_info_for_process(&sysinfo_pid, proc));
+            }
+        }
+        Ok(result)
     }
 
     fn take_snapshot(&self) -> Result<MemorySnapshot> {

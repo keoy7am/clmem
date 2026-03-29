@@ -50,6 +50,10 @@ pub trait Platform: Send + Sync {
     /// (PID files, sockets). Unix: $XDG_RUNTIME_DIR or /tmp. Windows: %TEMP%.
     fn runtime_dir(&self) -> std::path::PathBuf;
 
+    /// Refresh metadata for a set of known PIDs without scanning all system
+    /// processes. Much cheaper than `list_claude_processes` on most ticks.
+    fn refresh_known_processes(&self, pids: &[u32]) -> Result<Vec<ProcessInfo>>;
+
     /// Release memory back to the OS after cleanup.
     /// On Windows this calls EmptyWorkingSet; on other platforms it is a no-op.
     fn release_memory(&self, pid: u32) -> Result<()>;

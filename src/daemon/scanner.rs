@@ -21,10 +21,13 @@ struct TrackedProcess {
 /// - IDLE: no activity < idle_threshold -> monitor only, soft alert
 /// - STALE: no activity, parent alive -> wait stale_grace_period before downgrade
 /// - ORPHAN: parent dead, no IPC -> safe to auto-clean
+const FULL_SCAN_INTERVAL: u32 = 5;
+
 pub struct Scanner {
     platform: Arc<dyn Platform>,
     config: Config,
     known_processes: HashMap<u32, TrackedProcess>,
+    scan_counter: u32,
 }
 
 impl Scanner {
@@ -33,19 +36,38 @@ impl Scanner {
             platform,
             config,
             known_processes: HashMap::new(),
+            scan_counter: 0,
         }
     }
 
     /// Perform one scan cycle: discover processes, classify states, emit events.
+    ///
+    /// Every `FULL_SCAN_INTERVAL` scans, performs a full system scan to discover
+    /// new processes. On other ticks, only refreshes known PIDs for efficiency.
     pub fn scan(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         let now = Utc::now();
 
-        let processes = match self.platform.list_claude_processes() {
-            Ok(procs) => procs,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to list Claude processes");
-                return events;
+        let is_full_scan = self.scan_counter.is_multiple_of(FULL_SCAN_INTERVAL)
+            || self.known_processes.is_empty();
+        self.scan_counter = self.scan_counter.wrapping_add(1);
+
+        let processes = if is_full_scan {
+            match self.platform.list_claude_processes() {
+                Ok(procs) => procs,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to list Claude processes");
+                    return events;
+                }
+            }
+        } else {
+            let known_pids: Vec<u32> = self.known_processes.keys().copied().collect();
+            match self.platform.refresh_known_processes(&known_pids) {
+                Ok(procs) => procs,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to refresh known processes");
+                    return events;
+                }
             }
         };
 

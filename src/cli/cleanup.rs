@@ -80,14 +80,14 @@ fn cleanup_specific_pids(pids: &[u32], dry_run: bool, ipc_path: &std::path::Path
             println!("  PID {} -- already dead, skipping", pid);
             continue;
         }
-        println!("  Terminating PID {}...", pid);
+        tracing::info!(pid, "Terminating process");
         match platform.kill_process_tree(pid) {
             Ok(()) => {
                 let _ = platform.release_memory(pid);
                 cleaned += 1;
             }
             Err(e) => {
-                println!("  PID {} -- failed: {}", pid, e);
+                tracing::warn!(pid, error = %e, "Failed to terminate process");
                 failed += 1;
             }
         }

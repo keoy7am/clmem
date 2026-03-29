@@ -125,6 +125,54 @@ pub(crate) fn redact_sensitive_args(cmdline: &str) -> String {
     result
 }
 
+/// Build a `ProcessInfo` from OS-specific inputs.
+///
+/// Centralises the common logic shared by all platform `enumerate_claude_processes`
+/// implementations: timestamp conversion, activity estimation, state classification,
+/// and struct assembly.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_process_info(
+    pid: u32,
+    parent_pid: Option<u32>,
+    name: String,
+    cmdline: String,
+    memory: crate::models::MemoryUsage,
+    start_time_epoch: u64,
+    cpu_usage: f32,
+    has_tty: bool,
+    has_ipc: bool,
+    parent_exists: bool,
+) -> ProcessInfo {
+    let started_at = chrono::DateTime::from_timestamp(start_time_epoch as i64, 0)
+        .unwrap_or_else(chrono::Utc::now);
+    let last_activity = if cpu_usage > 0.0 {
+        chrono::Utc::now()
+    } else {
+        started_at
+    };
+
+    let state = if has_tty {
+        crate::models::ProcessState::Active
+    } else if !parent_exists && !has_ipc {
+        crate::models::ProcessState::Orphan
+    } else {
+        crate::models::ProcessState::Idle
+    };
+
+    ProcessInfo {
+        pid,
+        parent_pid,
+        name,
+        cmdline,
+        state,
+        memory,
+        started_at,
+        last_activity,
+        has_tty,
+        has_ipc,
+    }
+}
+
 /// Create the platform implementation for the current OS.
 pub fn create_platform() -> Box<dyn Platform> {
     #[cfg(target_os = "windows")]

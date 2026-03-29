@@ -1,4 +1,4 @@
-use super::{cmd_to_string, collect_process_tree, is_claude_process, Platform};
+use super::{build_process_info, cmd_to_string, collect_process_tree, is_claude_process, Platform};
 use crate::models::{MemorySnapshot, MemoryUsage, ProcessInfo, ProcessState};
 use anyhow::Result;
 use chrono::Utc;
@@ -21,6 +21,23 @@ impl WindowsPlatform {
     }
 }
 
+/// Check if parent is a known terminal process (cmd, powershell, etc.)
+fn check_parent_terminal(sys: &System, proc: &sysinfo::Process) -> bool {
+    proc.parent().map(|ppid| {
+        sys.process(ppid)
+            .map(|parent| {
+                let pname = parent.name().to_string_lossy().to_lowercase();
+                pname.contains("cmd.exe")
+                    || pname.contains("powershell")
+                    || pname.contains("pwsh")
+                    || pname.contains("windowsterminal")
+                    || pname.contains("conhost")
+                    || pname.contains("wt.exe")
+            })
+            .unwrap_or(false)
+    }).unwrap_or(false)
+}
+
 /// Enumerate Claude processes from an already-locked System reference.
 /// Shared by list_claude_processes and take_snapshot to avoid double-locking.
 fn enumerate_claude_processes(sys: &System) -> Vec<ProcessInfo> {
@@ -40,56 +57,21 @@ fn enumerate_claude_processes(sys: &System) -> Vec<ProcessInfo> {
             committed_bytes: proc.memory(), // Approximation; refined later with Win32 API
         };
 
-        // Use sysinfo start_time (seconds since UNIX epoch)
-        let started_at = {
-            let epoch_secs = proc.start_time() as i64;
-            chrono::DateTime::from_timestamp(epoch_secs, 0).unwrap_or_else(Utc::now)
-        };
-
-        // Estimate last_activity from CPU usage: if cpu > 0, active now
-        // Scanner will refine this by tracking CPU time changes
-        let last_activity = if proc.cpu_usage() > 0.0 {
-            Utc::now()
-        } else {
-            started_at
-        };
-
-        // Check if parent is a known terminal process (cmd, powershell, etc.)
-        let has_tty = proc.parent().map(|ppid| {
-            sys.process(ppid)
-                .map(|parent| {
-                    let pname = parent.name().to_string_lossy().to_lowercase();
-                    pname.contains("cmd.exe")
-                        || pname.contains("powershell")
-                        || pname.contains("pwsh")
-                        || pname.contains("windowsterminal")
-                        || pname.contains("conhost")
-                        || pname.contains("wt.exe")
-                })
-                .unwrap_or(false)
-        }).unwrap_or(false);
-
+        let has_tty = check_parent_terminal(sys, proc);
         let has_ipc = false;
-        let state = if has_tty {
-            ProcessState::Active
-        } else if proc.parent().is_none() && !has_ipc {
-            ProcessState::Orphan
-        } else {
-            ProcessState::Idle
-        };
 
-        result.push(ProcessInfo {
-            pid: pid.as_u32(),
-            parent_pid: proc.parent().map(|p| p.as_u32()),
+        result.push(build_process_info(
+            pid.as_u32(),
+            proc.parent().map(|p| p.as_u32()),
             name,
             cmdline,
-            state,
             memory,
-            started_at,
-            last_activity,
+            proc.start_time(),
+            proc.cpu_usage(),
             has_tty,
             has_ipc,
-        });
+            proc.parent().is_some(),
+        ));
     }
     result
 }

@@ -1,4 +1,4 @@
-use super::{cmd_to_string, collect_process_tree, is_claude_process, Platform};
+use super::{build_process_info, cmd_to_string, collect_process_tree, is_claude_process, Platform};
 use crate::models::{MemorySnapshot, MemoryUsage, ProcessInfo, ProcessState};
 use anyhow::Result;
 use chrono::Utc;
@@ -65,44 +65,21 @@ fn enumerate_claude_processes(sys: &System) -> Vec<ProcessInfo> {
             committed_bytes: 0,
         };
 
-        // Use sysinfo start_time (seconds since UNIX epoch)
-        let started_at = {
-            let epoch_secs = proc.start_time() as i64;
-            chrono::DateTime::from_timestamp(epoch_secs, 0).unwrap_or_else(Utc::now)
-        };
-
-        // Estimate last_activity from CPU usage: if cpu > 0, active now
-        // Scanner will refine this by tracking CPU time changes
-        let last_activity = if proc.cpu_usage() > 0.0 {
-            Utc::now()
-        } else {
-            started_at
-        };
-
         let has_tty = check_active_tty(sys, pid.as_u32());
         let has_ipc = false; // macOS lacks /proc; TODO: implement via proc_pidinfo
 
-        // ACTIVE checked FIRST (safety rule: ACTIVE -> NEVER touch)
-        let state = if has_tty {
-            ProcessState::Active
-        } else if proc.parent().is_none() && !has_ipc {
-            ProcessState::Orphan
-        } else {
-            ProcessState::Idle
-        };
-
-        result.push(ProcessInfo {
-            pid: pid.as_u32(),
-            parent_pid: proc.parent().map(|p| p.as_u32()),
+        result.push(build_process_info(
+            pid.as_u32(),
+            proc.parent().map(|p| p.as_u32()),
             name,
             cmdline,
-            state,
             memory,
-            started_at,
-            last_activity,
+            proc.start_time(),
+            proc.cpu_usage(),
             has_tty,
             has_ipc,
-        });
+            proc.parent().is_some(),
+        ));
     }
     result
 }

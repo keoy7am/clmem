@@ -24,8 +24,11 @@ use ratatui::{
     Frame, Terminal,
 };
 
+use chrono::Utc;
+
 use crate::ipc::{self, IpcMessage, IpcResponse};
 use crate::models::{AlertLevel, MemorySnapshot};
+use crate::util::format_bytes;
 
 use alerts::AlertsPanel;
 use charts::ChartPanel;
@@ -81,6 +84,7 @@ pub struct App {
     confirm_kill: Option<ConfirmDialog>,
     status_message: Option<(String, Instant)>,
     daemon_connected: bool,
+    show_detail: bool,
     ipc_rx: Option<mpsc::Receiver<IpcData>>,
     poller_stop: Arc<AtomicBool>,
 }
@@ -139,6 +143,7 @@ impl App {
             ipc_path: ipc::default_ipc_path(),
             last_snapshot: None,
             show_help: false,
+            show_detail: false,
             confirm_kill: None,
             status_message: None,
             daemon_connected: false,
@@ -236,6 +241,15 @@ impl App {
             return;
         }
 
+        // Detail overlay intercepts all keys except q and Esc
+        if self.show_detail {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => self.show_detail = false,
+                _ => {}
+            }
+            return;
+        }
+
         // Filter input mode: most keys go to the filter string
         if self.process_list.filter_active {
             match key.code {
@@ -283,6 +297,30 @@ impl App {
                 Panel::Dashboard => {}
             },
 
+            // Page navigation
+            KeyCode::PageUp => {
+                if self.active_panel == Panel::ProcessList {
+                    self.process_list.select_page_up(10);
+                }
+            }
+            KeyCode::PageDown => {
+                if self.active_panel == Panel::ProcessList {
+                    self.process_list.select_page_down(10);
+                }
+            }
+
+            // Jump to top/bottom
+            KeyCode::Home => {
+                if self.active_panel == Panel::ProcessList {
+                    self.process_list.select_first();
+                }
+            }
+            KeyCode::End => {
+                if self.active_panel == Panel::ProcessList {
+                    self.process_list.select_last();
+                }
+            }
+
             // Expand/collapse tree node
             KeyCode::Enter => {
                 if self.active_panel == Panel::ProcessList {
@@ -312,6 +350,15 @@ impl App {
             // Toggle name/cmdline display
             KeyCode::Char('c') => self.process_list.toggle_cmdline(),
 
+            // Show process detail overlay
+            KeyCode::Char('d') => {
+                if self.active_panel == Panel::ProcessList
+                    && self.process_list.selected_process().is_some()
+                {
+                    self.show_detail = true;
+                }
+            }
+
             // Start filter (like htop F4)
             KeyCode::Char('/') => {
                 self.active_panel = Panel::ProcessList;
@@ -327,6 +374,23 @@ impl App {
 
             // Help
             KeyCode::Char('?') => self.show_help = true,
+
+            // Function key aliases
+            KeyCode::F(1) => self.show_help = true,
+            KeyCode::F(3) => {
+                self.active_panel = Panel::ProcessList;
+                self.process_list.start_filter();
+            }
+            KeyCode::F(5) => self.process_list.toggle_tree_mode(),
+            KeyCode::F(9) => {
+                if let Some(proc_info) = self.process_list.selected_process() {
+                    self.confirm_kill = Some(ConfirmDialog {
+                        pid: proc_info.pid,
+                        name: proc_info.name.clone(),
+                    });
+                }
+            }
+            KeyCode::F(10) => self.running = false,
 
             _ => {}
         }
@@ -464,6 +528,10 @@ impl App {
         if let Some(ref dialog) = self.confirm_kill {
             self.render_confirm_dialog(frame, size, dialog);
         }
+
+        if self.show_detail {
+            self.render_detail_overlay(frame, size);
+        }
     }
 
     fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
@@ -519,7 +587,7 @@ impl App {
                 )
             } else if self.active_panel == Panel::ProcessList {
                 Span::styled(
-                    "?: help  q: quit  Tab: switch  /: filter  c: name/cmd  t: tree/flat",
+                    "?: help  q: quit  Tab: switch  /: filter  d: detail  t: tree/flat",
                     Style::default().fg(Color::DarkGray),
                 )
             } else {
@@ -554,7 +622,7 @@ impl App {
 
     fn render_help_overlay(&self, frame: &mut Frame, size: Rect) {
         let width = 50_u16.min(size.width.saturating_sub(4));
-        let height = 18_u16.min(size.height.saturating_sub(4));
+        let height = 25_u16.min(size.height.saturating_sub(4));
         let x = (size.width.saturating_sub(width)) / 2;
         let y = (size.height.saturating_sub(height)) / 2;
         let area = Rect::new(x, y, width, height);
@@ -567,18 +635,28 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from("  q / Esc     Quit"),
+            Line::from("  q / Esc     Quit (or clear filter)"),
             Line::from("  Tab         Cycle panels"),
             Line::from("  Up / k      Navigate up"),
             Line::from("  Down / j    Navigate down"),
+            Line::from("  PgUp/PgDn   Page up / down"),
+            Line::from("  Home/End    Jump to first / last"),
             Line::from("  Enter       Expand/collapse node"),
             Line::from("  K           Kill selected process"),
             Line::from("  r           Refresh data"),
             Line::from("  t           Toggle tree/flat view"),
             Line::from("  c           Toggle name/command"),
+            Line::from("  d           Process detail"),
             Line::from("  /           Filter processes"),
             Line::from("  1-5         Sort by column"),
             Line::from("  ?           Toggle this help"),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Function Keys:",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from("  F1=Help  F3=Filter  F5=Tree"),
+            Line::from("  F9=Kill  F10=Quit"),
             Line::from(""),
             Line::from(Span::styled(
                 "Sort Columns:",
@@ -627,6 +705,107 @@ impl App {
             .border_style(Style::default().fg(Color::Red));
 
         let paragraph = Paragraph::new(text).block(block);
+
+        frame.render_widget(Clear, area);
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_detail_overlay(&self, frame: &mut Frame, size: Rect) {
+        let proc_info = match self.process_list.selected_process() {
+            Some(p) => p,
+            None => return,
+        };
+
+        let width = 60_u16.min(size.width.saturating_sub(4));
+        let height = 20_u16.min(size.height.saturating_sub(4));
+        let x = (size.width.saturating_sub(width)) / 2;
+        let y = (size.height.saturating_sub(height)) / 2;
+        let area = Rect::new(x, y, width, height);
+
+        let label_style = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+
+        let now = Utc::now();
+        let uptime_secs = (now - proc_info.started_at).num_seconds().max(0) as u64;
+        let uptime_str = if uptime_secs >= 3600 {
+            format!("{}h {}m", uptime_secs / 3600, (uptime_secs % 3600) / 60)
+        } else {
+            format!("{}m {}s", uptime_secs / 60, uptime_secs % 60)
+        };
+
+        let state_str = format!("{:?}", proc_info.state);
+        let parent_str = proc_info
+            .parent_pid
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(" PID:       ", label_style),
+                Span::raw(proc_info.pid.to_string()),
+            ]),
+            Line::from(vec![
+                Span::styled(" Name:      ", label_style),
+                Span::raw(proc_info.name.clone()),
+            ]),
+            Line::from(vec![
+                Span::styled(" State:     ", label_style),
+                Span::raw(state_str),
+            ]),
+            Line::from(vec![
+                Span::styled(" Uptime:    ", label_style),
+                Span::raw(uptime_str),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(" Command:", label_style)),
+            Line::from(format!("   {}", proc_info.cmdline)),
+            Line::from(""),
+            Line::from(Span::styled(" Memory:", label_style)),
+            Line::from(vec![
+                Span::styled("   RSS:       ", label_style),
+                Span::raw(format_bytes(proc_info.memory.rss_bytes)),
+            ]),
+            Line::from(vec![
+                Span::styled("   VMS:       ", label_style),
+                Span::raw(format_bytes(proc_info.memory.vms_bytes)),
+            ]),
+            Line::from(vec![
+                Span::styled("   Swap:      ", label_style),
+                Span::raw(format_bytes(proc_info.memory.swap_bytes)),
+            ]),
+            Line::from(vec![
+                Span::styled("   Committed: ", label_style),
+                Span::raw(format_bytes(proc_info.memory.committed_bytes)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(" Parent PID: ", label_style),
+                Span::raw(parent_str),
+            ]),
+            Line::from(vec![
+                Span::styled(" Has TTY:    ", label_style),
+                Span::raw(proc_info.has_tty.to_string()),
+            ]),
+            Line::from(vec![
+                Span::styled(" Has IPC:    ", label_style),
+                Span::raw(proc_info.has_ipc.to_string()),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "       Press q or Esc to close",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+
+        let block = Block::default()
+            .title(" Process Detail ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
+
+        let paragraph = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
 
         frame.render_widget(Clear, area);
         frame.render_widget(paragraph, area);

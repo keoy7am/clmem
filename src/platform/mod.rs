@@ -205,6 +205,53 @@ pub(crate) fn build_process_info(
     }
 }
 
+/// Expand a set of already-discovered processes by collecting their descendants.
+///
+/// After the initial `is_claude_process` filter finds "root" processes, this
+/// function does a single O(N) pass to build a parent→children index, then BFS
+/// from each root to capture child processes that would not match the filter
+/// (e.g. git, python, ripgrep spawned by node.exe).
+pub(crate) fn expand_with_descendants(
+    sys: &sysinfo::System,
+    roots: Vec<ProcessInfo>,
+    build_fn: impl Fn(&sysinfo::Pid, &sysinfo::Process) -> ProcessInfo,
+) -> Vec<ProcessInfo> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use sysinfo::Pid;
+
+    // Already-seen PIDs (roots are already included)
+    let mut seen: HashSet<u32> = roots.iter().map(|p| p.pid).collect();
+    let mut result = roots;
+
+    // Build parent→children index in one pass over all system processes
+    let mut children_of: HashMap<Pid, Vec<Pid>> = HashMap::new();
+    for (pid, proc) in sys.processes() {
+        if let Some(parent) = proc.parent() {
+            children_of.entry(parent).or_default().push(*pid);
+        }
+    }
+
+    // BFS from each root PID
+    let mut queue: VecDeque<Pid> = result.iter().map(|p| Pid::from_u32(p.pid)).collect();
+    while let Some(parent) = queue.pop_front() {
+        if let Some(children) = children_of.get(&parent) {
+            for &child_pid in children {
+                let child_u32 = child_pid.as_u32();
+                if seen.contains(&child_u32) {
+                    continue;
+                }
+                seen.insert(child_u32);
+                if let Some(proc) = sys.process(child_pid) {
+                    result.push(build_fn(&child_pid, proc));
+                    queue.push_back(child_pid);
+                }
+            }
+        }
+    }
+
+    result
+}
+
 /// Create the platform implementation for the current OS.
 pub fn create_platform() -> Box<dyn Platform> {
     #[cfg(target_os = "windows")]

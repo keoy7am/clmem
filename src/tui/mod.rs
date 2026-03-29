@@ -274,6 +274,9 @@ impl App {
                 self.set_status("Refreshed");
             }
 
+            // Toggle tree/flat view
+            KeyCode::Char('t') => self.process_list.toggle_tree_mode(),
+
             // Sort columns (number keys)
             KeyCode::Char('1') => self.process_list.sort_by(process_list::SortColumn::Pid),
             KeyCode::Char('2') => self.process_list.sort_by(process_list::SortColumn::Name),
@@ -517,6 +520,7 @@ impl App {
             Line::from("  Down / j    Navigate down"),
             Line::from("  K           Kill selected process"),
             Line::from("  r           Refresh data"),
+            Line::from("  t           Toggle tree/flat view"),
             Line::from("  1-5         Sort by column"),
             Line::from("  ?           Toggle this help"),
             Line::from(""),

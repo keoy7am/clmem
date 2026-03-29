@@ -68,42 +68,24 @@ fn check_active_ipc(pid: u32) -> bool {
     false
 }
 
-/// Enumerate Claude processes from an already-locked System reference.
+/// Enumerate Claude processes and their descendants from an already-locked System reference.
 /// Shared by list_claude_processes and take_snapshot to avoid double-locking.
 fn enumerate_claude_processes(sys: &System) -> Vec<ProcessInfo> {
-    let mut result = Vec::new();
+    // Phase 1: find processes matching the Claude filter
+    let mut roots = Vec::new();
     for (pid, proc) in sys.processes() {
         let name = proc.name().to_string_lossy().to_string();
         let raw_cmdline = cmd_to_string(proc.cmd());
         if !is_claude_process(&name, &raw_cmdline) {
             continue;
         }
-        let cmdline = super::redact_sensitive_args(&raw_cmdline);
-
-        let memory = MemoryUsage {
-            rss_bytes: proc.memory(),
-            vms_bytes: proc.virtual_memory(),
-            swap_bytes: read_swap_bytes(pid.as_u32()),
-            committed_bytes: 0,
-        };
-
-        let has_tty = check_active_tty(pid.as_u32());
-        let has_ipc = check_active_ipc(pid.as_u32());
-
-        result.push(build_process_info(
-            pid.as_u32(),
-            proc.parent().map(|p| p.as_u32()),
-            name,
-            cmdline,
-            memory,
-            proc.start_time(),
-            proc.cpu_usage(),
-            has_tty,
-            has_ipc,
-            proc.parent().is_some(),
-        ));
+        roots.push(build_info_for_process(pid, proc));
     }
-    result
+
+    // Phase 2: expand to include all descendant processes
+    super::expand_with_descendants(sys, roots, |pid, proc| {
+        build_info_for_process(pid, proc)
+    })
 }
 
 /// Build ProcessInfo for a single sysinfo::Process entry (Linux-specific TTY/IPC checks).

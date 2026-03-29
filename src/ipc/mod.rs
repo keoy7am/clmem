@@ -1,4 +1,5 @@
 mod protocol;
+pub mod server;
 pub use protocol::{IpcMessage, IpcResponse};
 
 use anyhow::Result;

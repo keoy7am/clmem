@@ -87,7 +87,7 @@ cargo clippy -- -D warnings && cargo test
 
 ---
 
-## Phase C: Incremental Process Refresh (1 item, 1 session)
+## Phase C: Incremental Process Refresh (1 item, 1 session) ✅ DONE (v0.5.2)
 
 **Goal**: Reduce daemon CPU usage by scanning only known PIDs on most ticks.
 

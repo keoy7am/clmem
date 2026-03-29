@@ -2,7 +2,7 @@ use super::{cmd_to_string, collect_process_tree, is_claude_process, Platform};
 use crate::models::{MemorySnapshot, MemoryUsage, ProcessInfo, ProcessState};
 use anyhow::Result;
 use chrono::Utc;
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, Signal, System};
+use sysinfo::{Pid, MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, Signal, System};
 
 pub struct LinuxPlatform {
     system: std::sync::Mutex<System>,
@@ -11,7 +11,9 @@ pub struct LinuxPlatform {
 impl LinuxPlatform {
     pub fn new() -> Self {
         let system = System::new_with_specifics(
-            RefreshKind::new().with_processes(ProcessRefreshKind::everything()),
+            RefreshKind::new()
+                .with_processes(ProcessRefreshKind::everything())
+                .with_memory(MemoryRefreshKind::everything()),
         );
         Self {
             system: std::sync::Mutex::new(system),
@@ -43,12 +45,28 @@ impl Platform for LinuxPlatform {
                 committed_bytes: 0,
             };
 
-            let has_tty = false;
-            let has_ipc = false;
-            let state = if proc.parent().is_none() && !has_ipc {
-                ProcessState::Orphan
-            } else if has_tty {
+            // Use sysinfo start_time (seconds since UNIX epoch)
+            let started_at = {
+                let epoch_secs = proc.start_time() as i64;
+                chrono::DateTime::from_timestamp(epoch_secs, 0).unwrap_or_else(Utc::now)
+            };
+
+            // Estimate last_activity from CPU usage: if cpu > 0, active now
+            // Scanner will refine this by tracking CPU time changes
+            let last_activity = if proc.cpu_usage() > 0.0 {
+                Utc::now()
+            } else {
+                started_at
+            };
+
+            let has_tty = self.has_active_tty(pid.as_u32()).unwrap_or(false);
+            let has_ipc = self.has_active_ipc(pid.as_u32()).unwrap_or(false);
+
+            // ACTIVE checked FIRST (safety rule: ACTIVE → NEVER touch)
+            let state = if has_tty {
                 ProcessState::Active
+            } else if proc.parent().is_none() && !has_ipc {
+                ProcessState::Orphan
             } else {
                 ProcessState::Idle
             };
@@ -60,8 +78,8 @@ impl Platform for LinuxPlatform {
                 cmdline,
                 state,
                 memory,
-                started_at: Utc::now(),
-                last_activity: Utc::now(),
+                started_at,
+                last_activity,
                 has_tty,
                 has_ipc,
             });
@@ -71,10 +89,11 @@ impl Platform for LinuxPlatform {
 
     fn take_snapshot(&self) -> Result<MemorySnapshot> {
         let processes = self.list_claude_processes()?;
-        let sys = self
+        let mut sys = self
             .system
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        sys.refresh_memory();
 
         let total_rss: u64 = processes.iter().map(|p| p.memory.rss_bytes).sum();
         let total_vms: u64 = processes.iter().map(|p| p.memory.vms_bytes).sum();
@@ -101,9 +120,15 @@ impl Platform for LinuxPlatform {
     }
 
     fn is_process_alive(&self, pid: u32) -> bool {
-        let sys = self.system.lock().ok();
-        sys.map(|s| s.process(Pid::from_u32(pid)).is_some())
-            .unwrap_or(false)
+        if let Ok(mut sys) = self.system.lock() {
+            sys.refresh_processes(
+                ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+                false,
+            );
+            sys.process(Pid::from_u32(pid)).is_some()
+        } else {
+            false
+        }
     }
 
     fn has_active_tty(&self, pid: u32) -> Result<bool> {
@@ -135,25 +160,47 @@ impl Platform for LinuxPlatform {
     }
 
     fn terminate_process(&self, pid: u32) -> Result<()> {
-        let sys = self
+        let mut sys = self
             .system
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        sys.refresh_processes(
+            ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+            false,
+        );
         if let Some(proc) = sys.process(Pid::from_u32(pid)) {
-            proc.kill_with(Signal::Term);
+            match proc.kill_with(Signal::Term) {
+                Some(true) => Ok(()),
+                Some(false) => {
+                    tracing::warn!(pid, "SIGTERM delivery failed");
+                    Err(anyhow::anyhow!("Failed to send SIGTERM to PID {pid}"))
+                }
+                None => {
+                    tracing::warn!(pid, "SIGTERM not supported, falling back to SIGKILL");
+                    proc.kill();
+                    Ok(())
+                }
+            }
+        } else {
+            Err(anyhow::anyhow!("Process {pid} not found"))
         }
-        Ok(())
     }
 
     fn kill_process(&self, pid: u32) -> Result<()> {
-        let sys = self
+        let mut sys = self
             .system
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        sys.refresh_processes(
+            ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+            false,
+        );
         if let Some(proc) = sys.process(Pid::from_u32(pid)) {
             proc.kill();
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Process {pid} not found"))
         }
-        Ok(())
     }
 
     fn kill_process_tree(&self, pid: u32) -> Result<()> {
@@ -171,13 +218,13 @@ impl Platform for LinuxPlatform {
     }
 
     fn system_total_memory(&self) -> u64 {
-        let sys = self.system.lock().ok();
-        sys.map(|s| s.total_memory()).unwrap_or(0)
+        let mut sys = self.system.lock().ok();
+        sys.as_deref_mut().map(|s| { s.refresh_memory(); s.total_memory() }).unwrap_or(0)
     }
 
     fn system_available_memory(&self) -> u64 {
-        let sys = self.system.lock().ok();
-        sys.map(|s| s.available_memory()).unwrap_or(0)
+        let mut sys = self.system.lock().ok();
+        sys.as_deref_mut().map(|s| { s.refresh_memory(); s.available_memory() }).unwrap_or(0)
     }
 
     fn name(&self) -> &'static str {

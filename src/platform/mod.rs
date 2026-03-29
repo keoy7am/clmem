@@ -57,6 +57,23 @@ pub trait Platform: Send + Sync {
     /// Release memory back to the OS after cleanup.
     /// On Windows this calls EmptyWorkingSet; on other platforms it is a no-op.
     fn release_memory(&self, pid: u32) -> Result<()>;
+
+    /// Open a file in the user's editor. The `editor` string may contain
+    /// arguments (e.g. "code --wait"), which are split on whitespace.
+    fn open_in_editor(&self, path: &std::path::Path, editor: &str) -> Result<()> {
+        let parts: Vec<&str> = editor.split_whitespace().collect();
+        if parts.is_empty() {
+            anyhow::bail!("Editor string is empty");
+        }
+        let status = std::process::Command::new(parts[0])
+            .args(&parts[1..])
+            .arg(path)
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("Editor exited with status: {}", status);
+        }
+        Ok(())
+    }
 }
 
 /// Heuristic: is this process related to Claude Code?

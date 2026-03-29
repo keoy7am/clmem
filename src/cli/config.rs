@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use crate::models::Config;
+use crate::platform::create_platform;
 use crate::ConfigAction;
 
 /// Run the `clmem config` command.
@@ -39,21 +40,10 @@ fn config_edit() -> Result<()> {
         }
     });
 
-    let parts: Vec<&str> = editor.split_whitespace().collect();
-    if parts.is_empty() {
-        anyhow::bail!("EDITOR environment variable is empty");
-    }
-
     println!("Opening {} with {}...", path.display(), editor);
 
-    let status = std::process::Command::new(parts[0])
-        .args(&parts[1..])
-        .arg(&path)
-        .status()?;
-
-    if !status.success() {
-        anyhow::bail!("Editor exited with status: {}", status);
-    }
+    let platform = create_platform();
+    platform.open_in_editor(&path, &editor)?;
 
     Ok(())
 }

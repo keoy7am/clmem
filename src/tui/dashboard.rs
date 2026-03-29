@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::models::MemorySnapshot;
 
-use super::format_bytes;
+use crate::util::format_bytes;
 
 /// Dashboard overview panel showing system memory gauges and summary stats.
 pub struct DashboardPanel {

@@ -12,7 +12,6 @@ mod windows;
 ///
 /// All platform-specific code lives behind this trait. Callers in daemon/cli/tui
 /// must never call OS APIs directly -- always go through `Platform`.
-#[allow(dead_code)]
 pub trait Platform: Send + Sync {
     /// List all Claude Code related processes currently running.
     fn list_claude_processes(&self) -> Result<Vec<ProcessInfo>>;

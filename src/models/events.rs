@@ -60,7 +60,6 @@ pub struct Event {
 }
 
 impl Event {
-    #[allow(dead_code)]
     pub fn new(kind: EventKind) -> Self {
         Self {
             timestamp: Utc::now(),

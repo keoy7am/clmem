@@ -3,7 +3,7 @@ use anyhow::Result;
 use crate::ipc::{self, IpcMessage, IpcResponse};
 use crate::platform::create_platform;
 
-use super::format_bytes;
+use crate::util::format_bytes;
 
 /// Run the `clmem status` command.
 ///

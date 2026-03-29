@@ -6,6 +6,7 @@ mod ipc;
 mod models;
 mod platform;
 mod tui;
+mod util;
 
 #[derive(Parser)]
 #[command(name = "clmem", about = "Claude Code Memory Monitor", version)]

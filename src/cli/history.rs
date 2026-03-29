@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::ipc::{self, IpcMessage, IpcResponse};
 
-use super::format_bytes;
+use crate::util::format_bytes;
 
 /// Run the `clmem history` command.
 ///

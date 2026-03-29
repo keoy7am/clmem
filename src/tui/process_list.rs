@@ -11,7 +11,7 @@ use std::borrow::Cow;
 
 use crate::models::{ProcessInfo, ProcessState};
 
-use super::format_bytes;
+use crate::util::format_bytes;
 
 /// Sortable, scrollable process list panel.
 pub struct ProcessListPanel {

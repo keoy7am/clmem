@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use ratatui::{
@@ -21,6 +21,8 @@ struct DisplayProcess {
     depth: u16,
     /// True when this node is the last sibling at its depth (renders └─ vs ├─).
     is_last: bool,
+    /// True when this node has children (used for expand/collapse indicator).
+    has_children: bool,
 }
 
 /// Sortable, scrollable process list panel with optional tree view.
@@ -33,6 +35,8 @@ pub struct ProcessListPanel {
     sort_column: SortColumn,
     sort_ascending: bool,
     tree_mode: bool,
+    /// PIDs whose children are collapsed (hidden) in tree view.
+    collapsed: HashSet<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -55,6 +59,7 @@ impl ProcessListPanel {
             sort_column: SortColumn::Rss,
             sort_ascending: false,
             tree_mode: true,
+            collapsed: HashSet::new(),
         }
     }
 
@@ -92,6 +97,29 @@ impl ProcessListPanel {
         }
     }
 
+    /// Toggle expand/collapse for the currently selected process in tree mode.
+    pub fn toggle_collapse(&mut self) {
+        if !self.tree_mode {
+            return;
+        }
+        if let Some(pid) = self.selected_process().map(|p| p.pid) {
+            if self.collapsed.contains(&pid) {
+                self.collapsed.remove(&pid);
+            } else {
+                self.collapsed.insert(pid);
+            }
+            self.rebuild_display_list();
+            // Restore selection to the same PID
+            if let Some(new_idx) = self
+                .display_list
+                .iter()
+                .position(|d| d.info.pid == pid)
+            {
+                self.state.select(Some(new_idx));
+            }
+        }
+    }
+
     /// Rebuild the display list from raw_processes using current tree_mode and sort settings.
     fn rebuild_display_list(&mut self) {
         if self.tree_mode {
@@ -99,6 +127,7 @@ impl ProcessListPanel {
                 &self.raw_processes,
                 self.sort_column,
                 self.sort_ascending,
+                &self.collapsed,
             );
         } else {
             let mut flat = self.raw_processes.clone();
@@ -109,6 +138,7 @@ impl ProcessListPanel {
                     info,
                     depth: 0,
                     is_last: false,
+                    has_children: false,
                 })
                 .collect();
         }
@@ -121,7 +151,7 @@ impl ProcessListPanel {
             Color::DarkGray
         };
 
-        let header_cells = ["PID", "Name", "RSS", "VMS", "State", "Uptime"]
+        let header_cells = ["PID", "Command", "RSS", "VMS", "State", "Uptime"]
             .into_iter()
             .map(|h| {
                 Cell::from(Span::styled(
@@ -139,20 +169,28 @@ impl ProcessListPanel {
             let state_color = state_color(p.state);
             let uptime = format_duration((now - p.started_at).num_seconds().max(0) as u64);
 
-            let name_display = if self.tree_mode && d.depth > 0 {
+            // Build the command display string (like htop: show cmdline)
+            let cmd_text = format_command(&p.name, &p.cmdline);
+
+            let cmd_display = if self.tree_mode && d.depth > 0 {
                 let indent = "  ".repeat((d.depth - 1) as usize);
                 let branch = if d.is_last { "└─ " } else { "├─ " };
-                let prefix = format!("{indent}{branch}");
-                // Leave more room for the actual name
-                let max_name = 22_usize.saturating_sub(prefix.len());
-                format!("{prefix}{}", truncate_name(&p.name, max_name))
+                format!("{indent}{branch}{cmd_text}")
+            } else if self.tree_mode && d.has_children {
+                // Root with children: show collapse indicator
+                let indicator = if self.collapsed.contains(&p.pid) {
+                    "[+] "
+                } else {
+                    "[-] "
+                };
+                format!("{indicator}{cmd_text}")
             } else {
-                truncate_name(&p.name, 22).into_owned()
+                cmd_text
             };
 
             Row::new(vec![
                 Cell::from(p.pid.to_string()),
-                Cell::from(name_display),
+                Cell::from(cmd_display),
                 Cell::from(format_bytes(p.memory.rss_bytes)),
                 Cell::from(format_bytes(p.memory.vms_bytes)),
                 Cell::from(Span::styled(
@@ -167,7 +205,7 @@ impl ProcessListPanel {
 
         let widths = [
             ratatui::layout::Constraint::Length(8),
-            ratatui::layout::Constraint::Min(25),
+            ratatui::layout::Constraint::Min(40),
             ratatui::layout::Constraint::Length(10),
             ratatui::layout::Constraint::Length(10),
             ratatui::layout::Constraint::Length(8),
@@ -181,7 +219,7 @@ impl ProcessListPanel {
                 Block::default()
                     .title(format!(
                         " Processes ({}) [{}] [sort: {:?} {}] ",
-                        self.display_list.len(),
+                        self.raw_processes.len(),
                         mode_tag,
                         self.sort_column,
                         if self.sort_ascending { "▲" } else { "▼" }
@@ -253,6 +291,23 @@ impl ProcessListPanel {
 }
 
 // ---------------------------------------------------------------------------
+// Command display (htop-style)
+// ---------------------------------------------------------------------------
+
+/// Format a process command for display, similar to htop.
+///
+/// If `cmdline` is non-empty and differs from just the bare name, show the
+/// full command line. Otherwise fall back to the process name.
+fn format_command(name: &str, cmdline: &str) -> String {
+    if cmdline.is_empty() || cmdline == name {
+        return name.to_string();
+    }
+    // cmdline already contains the full invocation (e.g. "node /path/to/script.js --flag")
+    // Show it as-is; the table's Min constraint + terminal width will clip naturally.
+    cmdline.to_string()
+}
+
+// ---------------------------------------------------------------------------
 // Tree building
 // ---------------------------------------------------------------------------
 
@@ -260,18 +315,19 @@ impl ProcessListPanel {
 ///
 /// Roots are processes whose `parent_pid` is `None` or whose parent is not
 /// in the provided list.  Roots are sorted by the chosen column; children
-/// are sorted by PID for stability.
+/// are sorted by PID for stability.  Collapsed nodes' children are hidden.
 fn build_tree_list(
     processes: &[ProcessInfo],
     sort_col: SortColumn,
     sort_asc: bool,
+    collapsed: &HashSet<u32>,
 ) -> Vec<DisplayProcess> {
     if processes.is_empty() {
         return Vec::new();
     }
 
     // Index processes by PID
-    let pid_set: std::collections::HashSet<u32> = processes.iter().map(|p| p.pid).collect();
+    let pid_set: HashSet<u32> = processes.iter().map(|p| p.pid).collect();
 
     // Build parent → children map
     let mut children_of: HashMap<u32, Vec<usize>> = HashMap::new();
@@ -306,9 +362,10 @@ fn build_tree_list(
         dfs_collect(
             root_idx,
             0,
-            true, // roots are always "last" (no sibling context at level 0)
+            true,
             processes,
             &children_of,
+            collapsed,
             &mut result,
         );
     }
@@ -322,19 +379,37 @@ fn dfs_collect(
     is_last: bool,
     processes: &[ProcessInfo],
     children_of: &HashMap<u32, Vec<usize>>,
+    collapsed: &HashSet<u32>,
     result: &mut Vec<DisplayProcess>,
 ) {
+    let pid = processes[idx].pid;
+    let has_children = children_of.contains_key(&pid);
+    let is_collapsed = collapsed.contains(&pid);
+
     result.push(DisplayProcess {
         info: processes[idx].clone(),
         depth,
         is_last,
+        has_children,
     });
 
-    let pid = processes[idx].pid;
+    // Skip children if this node is collapsed
+    if is_collapsed {
+        return;
+    }
+
     if let Some(children) = children_of.get(&pid) {
         let last_i = children.len().saturating_sub(1);
         for (i, &child_idx) in children.iter().enumerate() {
-            dfs_collect(child_idx, depth + 1, i == last_i, processes, children_of, result);
+            dfs_collect(
+                child_idx,
+                depth + 1,
+                i == last_i,
+                processes,
+                children_of,
+                collapsed,
+                result,
+            );
         }
     }
 }
@@ -421,7 +496,7 @@ fn format_duration(secs: u64) -> String {
 }
 
 /// Truncate a name to fit within a column width.
-fn truncate_name(name: &str, max_len: usize) -> Cow<'_, str> {
+fn _truncate_name(name: &str, max_len: usize) -> Cow<'_, str> {
     if name.chars().count() <= max_len {
         Cow::Borrowed(name)
     } else {

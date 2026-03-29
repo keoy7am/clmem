@@ -258,6 +258,13 @@ impl App {
                 Panel::Dashboard => {}
             },
 
+            // Expand/collapse tree node
+            KeyCode::Enter => {
+                if self.active_panel == Panel::ProcessList {
+                    self.process_list.toggle_collapse();
+                }
+            }
+
             // Kill selected process (shift-K)
             KeyCode::Char('K') => {
                 if let Some(proc_info) = self.process_list.selected_process() {
@@ -518,6 +525,7 @@ impl App {
             Line::from("  Tab         Cycle panels"),
             Line::from("  Up / k      Navigate up"),
             Line::from("  Down / j    Navigate down"),
+            Line::from("  Enter       Expand/collapse node"),
             Line::from("  K           Kill selected process"),
             Line::from("  r           Refresh data"),
             Line::from("  t           Toggle tree/flat view"),

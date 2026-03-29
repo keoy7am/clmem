@@ -18,21 +18,12 @@ use tokio::sync::{watch, Mutex as TokioMutex};
 
 use crate::ipc::{default_ipc_path, IpcMessage, IpcResponse};
 use crate::models::{Config, Event, EventKind};
-use crate::platform::create_platform;
-
-/// PID file path for the daemon process.
-fn pid_file_path() -> std::path::PathBuf {
-    #[cfg(unix)]
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-    #[cfg(windows)]
-    let runtime_dir = std::env::var("TEMP").unwrap_or_else(|_| "C:\\Temp".to_string());
-
-    std::path::PathBuf::from(runtime_dir).join("clmem.pid")
-}
+use crate::platform::{create_platform, Platform};
 
 /// The main daemon orchestrating all monitoring subsystems.
 pub struct Daemon {
     config: Config,
+    platform: Arc<dyn Platform>,
     scanner: Arc<Mutex<Scanner>>,
     profiler: Arc<Mutex<Profiler>>,
     analyzer: Analyzer,
@@ -45,7 +36,7 @@ pub struct Daemon {
 impl Daemon {
     /// Create a new daemon with the given configuration.
     pub fn new(config: Config) -> Result<Self> {
-        let platform: Arc<dyn crate::platform::Platform> = Arc::from(create_platform());
+        let platform: Arc<dyn Platform> = Arc::from(create_platform());
 
         let scanner = Scanner::new(Arc::clone(&platform), config.clone());
         let profiler = Profiler::new(Arc::clone(&platform), &config);
@@ -56,6 +47,7 @@ impl Daemon {
 
         Ok(Self {
             config,
+            platform,
             scanner: Arc::new(Mutex::new(scanner)),
             profiler: Arc::new(Mutex::new(profiler)),
             analyzer,
@@ -206,8 +198,12 @@ impl Daemon {
         }
     }
 
+    fn pid_file_path(&self) -> std::path::PathBuf {
+        self.platform.runtime_dir().join("clmem.pid")
+    }
+
     fn write_pid_file(&self) -> Result<()> {
-        let path = pid_file_path();
+        let path = self.pid_file_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -223,14 +219,10 @@ impl Daemon {
                 writeln!(file, "{}", std::process::id())?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Check if existing PID is alive
+                // Check if existing PID is alive via Platform trait
                 if let Ok(contents) = std::fs::read_to_string(&path) {
                     if let Ok(pid) = contents.trim().parse::<u32>() {
-                        let s = sysinfo::System::new_with_specifics(
-                            sysinfo::RefreshKind::new()
-                                .with_processes(sysinfo::ProcessRefreshKind::new()),
-                        );
-                        if s.process(sysinfo::Pid::from_u32(pid)).is_some() {
+                        if self.platform.is_process_alive(pid) {
                             anyhow::bail!("Another daemon is already running (PID {pid})");
                         }
                     }
@@ -252,30 +244,12 @@ impl Daemon {
     }
 
     fn remove_pid_file(&self) {
-        let path = pid_file_path();
+        let path = self.pid_file_path();
         if path.exists() {
             if let Err(e) = std::fs::remove_file(&path) {
                 tracing::warn!(error = %e, "Failed to remove PID file");
             }
         }
-    }
-
-    fn remove_ipc_socket(&self) {
-        let ipc_path = self
-            .config
-            .ipc_path
-            .clone()
-            .unwrap_or_else(default_ipc_path);
-
-        #[cfg(unix)]
-        if ipc_path.exists() {
-            if let Err(e) = std::fs::remove_file(&ipc_path) {
-                tracing::warn!(error = %e, "Failed to remove IPC socket");
-            }
-        }
-
-        #[cfg(windows)]
-        let _ = &ipc_path;
     }
 }
 
@@ -348,7 +322,7 @@ async fn run_daemon_arc(daemon: Arc<Daemon>) -> Result<()> {
     }
     ipc_handle.abort();
     daemon.remove_pid_file();
-    daemon.remove_ipc_socket();
+    crate::ipc::remove_ipc_socket(&ipc_path);
 
     Ok(())
 }

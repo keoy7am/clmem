@@ -90,3 +90,16 @@ pub fn send_request(path: &Path, msg: &IpcMessage) -> Result<IpcResponse> {
 pub fn is_daemon_running(path: &Path) -> bool {
     send_request(path, &IpcMessage::Ping).is_ok()
 }
+
+/// Remove the IPC socket file on shutdown (Unix only; no-op on Windows).
+pub fn remove_ipc_socket(ipc_path: &Path) {
+    #[cfg(unix)]
+    if ipc_path.exists() {
+        if let Err(e) = std::fs::remove_file(ipc_path) {
+            tracing::warn!(error = %e, "Failed to remove IPC socket");
+        }
+    }
+
+    #[cfg(windows)]
+    let _ = ipc_path;
+}

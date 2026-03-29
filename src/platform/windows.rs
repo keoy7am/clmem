@@ -197,4 +197,10 @@ impl Platform for WindowsPlatform {
         tracing::debug!(pid, "EmptyWorkingSet requested (stub)");
         Ok(())
     }
+
+    fn runtime_dir(&self) -> std::path::PathBuf {
+        std::path::PathBuf::from(
+            std::env::var("TEMP").unwrap_or_else(|_| r"C:\Temp".to_string()),
+        )
+    }
 }

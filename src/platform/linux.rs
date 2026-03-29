@@ -226,4 +226,10 @@ impl Platform for LinuxPlatform {
         // Linux: no equivalent to EmptyWorkingSet; kernel manages memory reclaim.
         Ok(())
     }
+
+    fn runtime_dir(&self) -> std::path::PathBuf {
+        std::path::PathBuf::from(
+            std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string()),
+        )
+    }
 }

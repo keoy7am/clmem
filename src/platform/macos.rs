@@ -228,4 +228,10 @@ impl Platform for MacosPlatform {
         // macOS: no direct equivalent to EmptyWorkingSet.
         Ok(())
     }
+
+    fn runtime_dir(&self) -> std::path::PathBuf {
+        std::path::PathBuf::from(
+            std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string()),
+        )
+    }
 }

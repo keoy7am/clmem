@@ -46,6 +46,10 @@ pub trait Platform: Send + Sync {
     /// Platform name string ("windows", "linux", or "macos").
     fn name(&self) -> &'static str;
 
+    /// Return the platform-specific runtime directory for ephemeral files
+    /// (PID files, sockets). Unix: $XDG_RUNTIME_DIR or /tmp. Windows: %TEMP%.
+    fn runtime_dir(&self) -> std::path::PathBuf;
+
     /// Release memory back to the OS after cleanup.
     /// On Windows this calls EmptyWorkingSet; on other platforms it is a no-op.
     fn release_memory(&self, pid: u32) -> Result<()>;

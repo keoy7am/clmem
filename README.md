@@ -1,5 +1,7 @@
 # clmem
 
+[English](README.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md)
+
 A cross-platform memory monitoring and management tool for Claude Code CLI.
 
 Claude Code CLI (Node.js-based) suffers from memory leaks, orphaned processes, and unreleased virtual/committed memory — especially on Windows. `clmem` watches, detects, and cleans up these issues automatically.
@@ -11,6 +13,7 @@ Claude Code CLI (Node.js-based) suffers from memory leaks, orphaned processes, a
 - **Orphan cleanup** — Detect and safely terminate processes that survive after Claude Code exits
 - **Windows committed memory** — Handle V8 engine memory retention and orphaned named pipe handles
 - **TUI dashboard** — htop-style terminal interface with live charts and process management
+- **Memory intelligence** — RSS delta tracking, color-coded memory usage, and inline sparkline trends
 - **Diagnostic reports** — Export memory history and generate diagnostic reports for debugging
 
 ## Installation
@@ -70,15 +73,47 @@ Terminal UI with live memory charts, process list, and alerts. Connects to the d
 clmem tui
 ```
 
+**Keyboard Shortcuts:**
+
 | Key | Action |
 |-----|--------|
 | `Tab` | Cycle between panels |
 | `j/k` or `↑/↓` | Navigate process list |
+| `PgUp/PgDn` | Page up / down |
+| `Home/End` | Jump to first / last |
+| `Enter` | Expand / collapse tree node |
 | `K` | Kill selected process |
-| `r` | Refresh |
-| `1`-`5` | Sort by column |
+| `d` | Toggle process detail overlay |
+| `t` | Toggle tree / flat view |
+| `c` | Toggle name / command display |
+| `/` | Filter processes |
+| `r` | Refresh data |
+| `1`–`5` | Sort by column (PID, Name, RSS, VMS, State) |
 | `?` | Help |
-| `q` / `Esc` | Quit |
+| `q` / `Esc` | Quit (or clear filter) |
+
+**Function Keys:**
+
+| Key | Action |
+|-----|--------|
+| `F1` | Help |
+| `F3` | Filter |
+| `F5` | Toggle tree view |
+| `F9` | Kill process |
+| `F10` | Quit |
+
+**Table Columns:**
+
+| Column | Description |
+|--------|-------------|
+| PID | Process ID |
+| Command / Name | Full command line or process name (toggle with `c`) |
+| RSS | Resident Set Size, color-coded: green (<50 MB), yellow (50–200 MB), red (>200 MB) |
+| Delta | RSS change since last update: red (+growth), green (−shrink), gray (no change) |
+| VMS / Commit | Virtual memory (Linux/macOS) or committed memory (Windows), color-coded |
+| Trend | Inline sparkline showing RSS history (last 20 samples) |
+| State | Process state: ACTIVE, IDLE, STALE, ORPHAN |
+| Uptime | Time since process started |
 
 ### `clmem cleanup` — Process Cleanup
 
@@ -169,7 +204,7 @@ clmem (single binary)
 ├── tui       — Terminal dashboard (ratatui + crossterm)
 │   ├── dashboard  — Memory gauges and summary stats
 │   ├── charts     — Real-time memory trend lines
-│   ├── process list — Sortable, color-coded table
+│   ├── process list — Sortable table with tree view, delta, sparkline
 │   └── alerts     — Event history with severity colors
 ├── cli       — Command interface (clap derive)
 │   ├── status, cleanup, history, report, config

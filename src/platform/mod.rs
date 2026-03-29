@@ -52,6 +52,43 @@ pub trait Platform: Send + Sync {
     fn release_memory(&self, pid: u32) -> Result<()>;
 }
 
+/// Heuristic: is this process related to Claude Code?
+pub(crate) fn is_claude_process(name: &str, cmdline: &str) -> bool {
+    let name_lower = name.to_ascii_lowercase();
+    let cmd_lower = cmdline.to_ascii_lowercase();
+    name_lower.contains("claude")
+        || (name_lower.contains("node") && cmd_lower.contains("claude"))
+        || cmd_lower.contains("claude-code")
+        || cmd_lower.contains("@anthropic")
+}
+
+/// Join OsString slices into a single String for matching.
+pub(crate) fn cmd_to_string(cmd: &[std::ffi::OsString]) -> String {
+    cmd.iter()
+        .map(|s| s.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Collect all descendant PIDs of a root process using BFS traversal.
+/// Returns PIDs in reverse order (children before parents) for safe termination.
+pub(crate) fn collect_process_tree(sys: &sysinfo::System, root_pid: u32) -> Vec<sysinfo::Pid> {
+    use sysinfo::Pid;
+    let mut to_kill = vec![Pid::from_u32(root_pid)];
+    let mut i = 0;
+    while i < to_kill.len() {
+        let parent = to_kill[i];
+        for (child_pid, proc_info) in sys.processes() {
+            if proc_info.parent() == Some(parent) && !to_kill.contains(child_pid) {
+                to_kill.push(*child_pid);
+            }
+        }
+        i += 1;
+    }
+    to_kill.reverse();
+    to_kill
+}
+
 /// Redact sensitive arguments from command line strings.
 pub(crate) fn redact_sensitive_args(cmdline: &str) -> String {
     let sensitive_flags = ["--api-key", "--token", "--password", "--secret", "--auth"];

@@ -1,4 +1,4 @@
-use super::Platform;
+use super::{cmd_to_string, collect_process_tree, is_claude_process, Platform};
 use crate::models::{MemorySnapshot, MemoryUsage, ProcessInfo, ProcessState};
 use anyhow::Result;
 use chrono::Utc;
@@ -17,22 +17,6 @@ impl LinuxPlatform {
             system: std::sync::Mutex::new(system),
         }
     }
-
-    fn is_claude_process(name: &str, cmdline: &str) -> bool {
-        let name_lower = name.to_lowercase();
-        let cmd_lower = cmdline.to_lowercase();
-        name_lower.contains("claude")
-            || (name_lower.contains("node") && cmd_lower.contains("claude"))
-            || cmd_lower.contains("claude-code")
-            || cmd_lower.contains("@anthropic")
-    }
-
-    fn cmd_to_string(cmd: &[std::ffi::OsString]) -> String {
-        cmd.iter()
-            .map(|s| s.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
 }
 
 impl Platform for LinuxPlatform {
@@ -46,8 +30,8 @@ impl Platform for LinuxPlatform {
         let mut result = Vec::new();
         for (pid, proc) in sys.processes() {
             let name = proc.name().to_string_lossy().to_string();
-            let raw_cmdline = Self::cmd_to_string(proc.cmd());
-            if !Self::is_claude_process(&name, &raw_cmdline) {
+            let raw_cmdline = cmd_to_string(proc.cmd());
+            if !is_claude_process(&name, &raw_cmdline) {
                 continue;
             }
             let cmdline = super::redact_sensitive_args(&raw_cmdline);
@@ -177,19 +161,9 @@ impl Platform for LinuxPlatform {
             .system
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-        let mut to_kill = vec![pid];
-        let mut i = 0;
-        while i < to_kill.len() {
-            let parent = Pid::from_u32(to_kill[i]);
-            for (child_pid, proc) in sys.processes() {
-                if proc.parent() == Some(parent) {
-                    to_kill.push(child_pid.as_u32());
-                }
-            }
-            i += 1;
-        }
-        for &p in to_kill.iter().rev() {
-            if let Some(proc) = sys.process(Pid::from_u32(p)) {
+        let to_kill = collect_process_tree(&sys, pid);
+        for p in &to_kill {
+            if let Some(proc) = sys.process(*p) {
                 proc.kill();
             }
         }

@@ -30,6 +30,9 @@ clmem.toml
 *.log
 logs/
 
+# Temporary files
+/tmp/
+
 # Test artifacts
 /coverage/
 *.profraw

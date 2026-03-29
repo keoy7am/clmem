@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use chrono::{DateTime, Utc};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -22,6 +23,10 @@ pub struct AlertsPanel {
     alerts: VecDeque<AlertEntry>,
     max_alerts: usize,
     scroll_offset: usize,
+    /// Timestamp of the newest event we have already ingested.
+    /// Events at or before this timestamp are skipped to prevent duplicates
+    /// when `get_recent()` returns the same batch on consecutive polls.
+    last_seen: Option<DateTime<Utc>>,
 }
 
 impl AlertsPanel {
@@ -30,12 +35,22 @@ impl AlertsPanel {
             alerts: VecDeque::new(),
             max_alerts,
             scroll_offset: 0,
+            last_seen: None,
         }
     }
 
     /// Ingest events from the daemon and convert them to alert entries.
+    ///
+    /// Skips events whose timestamp is at or before `last_seen` to avoid
+    /// re-adding the same events on every IPC poll cycle.
     pub fn update(&mut self, events: &[Event]) {
         for event in events {
+            // Deduplicate: skip events we have already processed.
+            if let Some(cutoff) = self.last_seen {
+                if event.timestamp <= cutoff {
+                    continue;
+                }
+            }
             let (level, message) = match &event.kind {
                 EventKind::ProcessDiscovered { pid, name } => (
                     AlertLevel::Info,
@@ -80,6 +95,13 @@ impl AlertsPanel {
                 level,
                 message,
             });
+
+            // Advance the high-water mark
+            match self.last_seen {
+                Some(ref mut ts) if event.timestamp > *ts => *ts = event.timestamp,
+                None => self.last_seen = Some(event.timestamp),
+                _ => {}
+            }
         }
 
         // Trim to max alerts

@@ -121,12 +121,19 @@ impl DashboardPanel {
         frame.render_widget(self.make_gauge(&rss_label, rss_ratio), gauge_areas[idx]);
         idx += 1;
 
-        // Claude VMS gauge (relative to system total)
-        let vms_ratio = self.ratio(self.claude_vms, self.system_total);
+        // Claude VMS gauge — VMS routinely exceeds physical RAM (shared libs,
+        // memory-mapped files, page file) so we show it as proportion of RSS
+        // to give users a sense of over-commit without a misleading "% of system".
+        let vms_ratio = if self.claude_rss > 0 {
+            // Show how much of VMS is backed by physical RSS (higher = better)
+            (self.claude_rss as f64 / self.claude_vms.max(1) as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let vms_label = format!(
-            "Claude VMS: {} ({:.1}% of system)",
+            "Claude VMS: {} ({} processes)",
             format_bytes(self.claude_vms),
-            vms_ratio * 100.0,
+            self.process_count,
         );
         frame.render_widget(self.make_gauge(&vms_label, vms_ratio), gauge_areas[idx]);
 

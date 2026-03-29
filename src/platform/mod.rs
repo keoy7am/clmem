@@ -52,6 +52,35 @@ pub trait Platform: Send + Sync {
     fn release_memory(&self, pid: u32) -> Result<()>;
 }
 
+/// Redact sensitive arguments from command line strings.
+pub(crate) fn redact_sensitive_args(cmdline: &str) -> String {
+    let sensitive_flags = ["--api-key", "--token", "--password", "--secret", "--auth"];
+    let mut result = String::new();
+    let mut redact_next = false;
+    for part in cmdline.split_whitespace() {
+        if !result.is_empty() {
+            result.push(' ');
+        }
+        if redact_next {
+            result.push_str("[REDACTED]");
+            redact_next = false;
+        } else if sensitive_flags.iter().any(|f| part.starts_with(f)) {
+            if part.contains('=') {
+                if let Some(flag) = part.split('=').next() {
+                    result.push_str(flag);
+                    result.push_str("=[REDACTED]");
+                }
+            } else {
+                result.push_str(part);
+                redact_next = true;
+            }
+        } else {
+            result.push_str(part);
+        }
+    }
+    result
+}
+
 /// Create the platform implementation for the current OS.
 pub fn create_platform() -> Box<dyn Platform> {
     #[cfg(target_os = "windows")]

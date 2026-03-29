@@ -50,10 +50,11 @@ impl Platform for WindowsPlatform {
         let mut result = Vec::new();
         for (pid, proc) in sys.processes() {
             let name = proc.name().to_string_lossy().to_string();
-            let cmdline = Self::cmd_to_string(proc.cmd());
-            if !Self::is_claude_process(&name, &cmdline) {
+            let raw_cmdline = Self::cmd_to_string(proc.cmd());
+            if !Self::is_claude_process(&name, &raw_cmdline) {
                 continue;
             }
+            let cmdline = super::redact_sensitive_args(&raw_cmdline);
 
             let memory = MemoryUsage {
                 rss_bytes: proc.memory(),

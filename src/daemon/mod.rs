@@ -194,7 +194,42 @@ impl Daemon {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&path, std::process::id().to_string())?;
+
+        // Try atomic creation first (create_new fails if file exists)
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                writeln!(file, "{}", std::process::id())?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Check if existing PID is alive
+                if let Ok(contents) = std::fs::read_to_string(&path) {
+                    if let Ok(pid) = contents.trim().parse::<u32>() {
+                        let s = sysinfo::System::new_with_specifics(
+                            sysinfo::RefreshKind::new()
+                                .with_processes(sysinfo::ProcessRefreshKind::new()),
+                        );
+                        if s.process(sysinfo::Pid::from_u32(pid)).is_some() {
+                            anyhow::bail!("Another daemon is already running (PID {pid})");
+                        }
+                    }
+                }
+                // Stale PID file -- remove and retry
+                std::fs::remove_file(&path)?;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)?;
+                use std::io::Write;
+                writeln!(file, "{}", std::process::id())?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+
         tracing::debug!(path = %path.display(), "PID file written");
         Ok(())
     }
@@ -378,8 +413,11 @@ async fn start_ipc_listener_platform(
         anyhow::bail!("Another daemon instance is already running");
     }
 
-    // Create the first pipe server instance
-    let mut server = ServerOptions::new().create(&pipe_name)?;
+    // Create the first pipe server instance (reject_remote_clients is default-true,
+    // but set explicitly for defense-in-depth)
+    let mut server = ServerOptions::new()
+        .reject_remote_clients(true)
+        .create(&pipe_name)?;
 
     tracing::info!(pipe = %pipe_name, "Windows named pipe server created");
 
@@ -396,7 +434,10 @@ async fn start_ipc_listener_platform(
             tracing::debug!("Named pipe client connected");
 
             // Create a new server instance for the next client BEFORE handling this one
-            let new_server = match ServerOptions::new().create(&pipe_name) {
+            let new_server = match ServerOptions::new()
+                .reject_remote_clients(true)
+                .create(&pipe_name)
+            {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!(error = %e, "Failed to create next pipe instance");

@@ -33,6 +33,25 @@ fn check_active_tty(pid: u32) -> bool {
     }
 }
 
+/// Read per-process swap usage from /proc/{pid}/status (VmSwap line).
+/// Returns 0 if the file cannot be read or the field is missing.
+fn read_swap_bytes(pid: u32) -> u64 {
+    let path = format!("/proc/{}/status", pid);
+    if let Ok(contents) = std::fs::read_to_string(&path) {
+        for line in contents.lines() {
+            if let Some(rest) = line.strip_prefix("VmSwap:") {
+                let rest = rest.trim();
+                if let Some(kb_str) = rest.strip_suffix("kB").or_else(|| rest.strip_suffix("KB")) {
+                    if let Ok(kb) = kb_str.trim().parse::<u64>() {
+                        return kb * 1024;
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
 /// Check if a process has an active IPC connection via /proc filesystem (no lock needed).
 fn check_active_ipc(pid: u32) -> bool {
     let fd_dir = format!("/proc/{}/fd", pid);
@@ -64,7 +83,7 @@ fn enumerate_claude_processes(sys: &System) -> Vec<ProcessInfo> {
         let memory = MemoryUsage {
             rss_bytes: proc.memory(),
             vms_bytes: proc.virtual_memory(),
-            swap_bytes: 0,
+            swap_bytes: read_swap_bytes(pid.as_u32()),
             committed_bytes: 0,
         };
 
@@ -96,7 +115,7 @@ fn build_info_for_process(pid: &Pid, proc: &sysinfo::Process) -> ProcessInfo {
     let memory = MemoryUsage {
         rss_bytes: proc.memory(),
         vms_bytes: proc.virtual_memory(),
-        swap_bytes: 0,
+        swap_bytes: read_swap_bytes(pid.as_u32()),
         committed_bytes: 0,
     };
 

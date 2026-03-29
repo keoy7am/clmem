@@ -217,7 +217,13 @@ impl ProcessListPanel {
         };
 
         let cmd_header = if self.show_cmdline { "Command" } else { "Name" };
-        let header_cells = ["PID", cmd_header, "RSS", "Delta", "VMS", "Trend", "State", "Uptime"]
+        // On Windows, committed_bytes > 0; show "Commit" instead of "VMS"
+        let use_committed = self
+            .raw_processes
+            .first()
+            .is_some_and(|p| p.memory.committed_bytes > 0);
+        let vms_header = if use_committed { "Commit" } else { "VMS" };
+        let header_cells = ["PID", cmd_header, "RSS", "Delta", vms_header, "Trend", "State", "Uptime"]
             .into_iter()
             .map(|h| {
                 Cell::from(Span::styled(
@@ -284,8 +290,8 @@ impl ProcessListPanel {
                     Style::default().fg(delta_color),
                 )),
                 Cell::from(Span::styled(
-                    format_bytes(p.memory.vms_bytes),
-                    Style::default().fg(vms_color(p.memory.vms_bytes)),
+                    format_bytes(effective_vms(p)),
+                    Style::default().fg(vms_color(effective_vms(p))),
                 )),
                 Cell::from(Span::styled(
                     sparkline_text,
@@ -618,7 +624,7 @@ fn sort_indices(
             SortColumn::Pid => pa.pid.cmp(&pb.pid),
             SortColumn::Name => pa.name.to_ascii_lowercase().cmp(&pb.name.to_ascii_lowercase()),
             SortColumn::Rss => pa.memory.rss_bytes.cmp(&pb.memory.rss_bytes),
-            SortColumn::Vms => pa.memory.vms_bytes.cmp(&pb.memory.vms_bytes),
+            SortColumn::Vms => effective_vms(pa).cmp(&effective_vms(pb)),
             SortColumn::State => state_order(pa.state).cmp(&state_order(pb.state)),
         };
         if asc { ord } else { ord.reverse() }
@@ -641,7 +647,7 @@ fn sort_processes_flat(processes: &mut [ProcessInfo], col: SortColumn, asc: bool
                 SortColumn::Pid => a.pid.cmp(&b.pid),
                 SortColumn::Name => unreachable!(),
                 SortColumn::Rss => a.memory.rss_bytes.cmp(&b.memory.rss_bytes),
-                SortColumn::Vms => a.memory.vms_bytes.cmp(&b.memory.vms_bytes),
+                SortColumn::Vms => effective_vms(a).cmp(&effective_vms(b)),
                 SortColumn::State => state_order(a.state).cmp(&state_order(b.state)),
             };
             if asc { ord } else { ord.reverse() }
@@ -705,13 +711,24 @@ fn rss_color(bytes: u64) -> Color {
     }
 }
 
-/// Color for VMS cell based on virtual memory usage.
+/// Return the effective VMS value: committed_bytes on Windows (> 0),
+/// otherwise vms_bytes.
+fn effective_vms(p: &ProcessInfo) -> u64 {
+    if p.memory.committed_bytes > 0 {
+        p.memory.committed_bytes
+    } else {
+        p.memory.vms_bytes
+    }
+}
+
+/// Color for VMS/Commit cell based on memory usage.
+/// Thresholds match RSS since committed memory ≈ actual usage.
 fn vms_color(bytes: u64) -> Color {
-    const GB1: u64 = 1024 * 1024 * 1024;
-    const GB5: u64 = 5 * GB1;
-    if bytes < GB1 {
+    const MB100: u64 = 100 * 1024 * 1024;
+    const MB500: u64 = 500 * 1024 * 1024;
+    if bytes < MB100 {
         Color::Green
-    } else if bytes <= GB5 {
+    } else if bytes <= MB500 {
         Color::Yellow
     } else {
         Color::Red

@@ -279,6 +279,10 @@ impl ProcessListPanel {
             .map(|d| &d.info)
     }
 
+    pub fn is_tree_mode(&self) -> bool {
+        self.tree_mode
+    }
+
     pub fn sort_by(&mut self, col: SortColumn) {
         if self.sort_column == col {
             self.sort_ascending = !self.sort_ascending;

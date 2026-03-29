@@ -479,7 +479,11 @@ impl App {
             Span::styled(status_msg, Style::default().fg(Color::Yellow)),
             Span::raw("  "),
             Span::styled(
-                "?: help  q: quit  Tab: switch panel",
+                if self.active_panel == Panel::ProcessList && self.process_list.is_tree_mode() {
+                    "?: help  q: quit  Tab: switch  Enter: expand/collapse  t: tree/flat"
+                } else {
+                    "?: help  q: quit  Tab: switch panel"
+                },
                 Style::default().fg(Color::DarkGray),
             ),
         ]);

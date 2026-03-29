@@ -59,7 +59,7 @@ impl Scanner {
             if self.known_processes.contains_key(&pid) {
                 // Extract data from tracked process (release mutable borrow)
                 let (old_started_at, old_last_activity, old_rss, old_state) = {
-                    let tracked = self.known_processes.get(&pid).unwrap();
+                    let tracked = self.known_processes.get(&pid).expect("pid confirmed present via contains_key");
                     (
                         tracked.info.started_at,
                         tracked.info.last_activity,
@@ -84,7 +84,7 @@ impl Scanner {
                 proc_info.state = new_state;
 
                 // Now mutate the tracked entry
-                let tracked = self.known_processes.get_mut(&pid).unwrap();
+                let tracked = self.known_processes.get_mut(&pid).expect("pid confirmed present via contains_key");
                 tracked.last_rss = proc_info.memory.rss_bytes;
 
                 if new_state == ProcessState::Stale && tracked.stale_since.is_none() {

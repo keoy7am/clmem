@@ -74,11 +74,11 @@ impl Daemon {
         let profiler = Arc::clone(&self.profiler);
         let (scan_events, record_err) = tokio::task::spawn_blocking(move || {
             let scan_events = {
-                let mut s = scanner.lock().unwrap();
+                let mut s = scanner.lock().expect("scanner mutex poisoned");
                 s.scan()
             };
             let record_err = {
-                let mut p = profiler.lock().unwrap();
+                let mut p = profiler.lock().expect("profiler mutex poisoned");
                 p.record().err()
             };
             (scan_events, record_err)
@@ -96,7 +96,7 @@ impl Daemon {
 
         if self.config.auto_cleanup {
             let processes = {
-                let scanner = self.scanner.lock().unwrap();
+                let scanner = self.scanner.lock().expect("scanner mutex poisoned");
                 scanner.get_processes()
             };
             let reap_events = self.reaper.reap_orphans(&processes).await;
@@ -110,7 +110,7 @@ impl Daemon {
     /// Run the leak detection analyzer against the profiler history.
     async fn run_leak_analysis(&self) {
         let history = {
-            let profiler = self.profiler.lock().unwrap();
+            let profiler = self.profiler.lock().expect("profiler mutex poisoned");
             profiler.get_history(60)
         };
 
@@ -134,7 +134,7 @@ impl Daemon {
             IpcMessage::Ping => IpcResponse::Pong,
 
             IpcMessage::GetStatus => {
-                let scanner = self.scanner.lock().unwrap();
+                let scanner = self.scanner.lock().expect("scanner mutex poisoned");
                 let processes = scanner.get_processes();
                 let monitoring_count = processes.len() as u32;
                 let orphan_count = processes
@@ -155,7 +155,7 @@ impl Daemon {
             }
 
             IpcMessage::GetSnapshot => {
-                let profiler = self.profiler.lock().unwrap();
+                let profiler = self.profiler.lock().expect("profiler mutex poisoned");
                 match profiler.get_latest() {
                     Some(snapshot) => IpcResponse::Snapshot(Box::new(snapshot.clone())),
                     None => IpcResponse::Error("No snapshots recorded yet".to_string()),
@@ -163,13 +163,13 @@ impl Daemon {
             }
 
             IpcMessage::GetProcessList => {
-                let scanner = self.scanner.lock().unwrap();
+                let scanner = self.scanner.lock().expect("scanner mutex poisoned");
                 IpcResponse::ProcessList(scanner.get_processes())
             }
 
             IpcMessage::GetHistory { last_n } => {
                 let last_n = last_n.min(3600);
-                let profiler = self.profiler.lock().unwrap();
+                let profiler = self.profiler.lock().expect("profiler mutex poisoned");
                 IpcResponse::History(profiler.get_history(last_n))
             }
 
@@ -181,7 +181,7 @@ impl Daemon {
 
             IpcMessage::Cleanup { pids, force } => {
                 let processes = {
-                    let scanner = self.scanner.lock().unwrap();
+                    let scanner = self.scanner.lock().expect("scanner mutex poisoned");
                     scanner.get_processes()
                 };
                 let (cleaned, failed) = self.reaper.cleanup_pids(&pids, force, &processes).await;
@@ -517,7 +517,7 @@ async fn handle_unix_connection_inner(daemon: Arc<Daemon>, stream: tokio::net::U
     reader.read_exact(&mut msg_buf).await?;
     let msg: IpcMessage = serde_json::from_slice(&msg_buf)?;
 
-    tracing::debug!(?msg, "IPC message received");
+    tracing::debug!(msg_type = ?std::mem::discriminant(&msg), "IPC message received");
 
     let response = daemon.handle_message(msg).await;
 
@@ -563,7 +563,7 @@ async fn handle_windows_pipe_async_inner(
     pipe.read_exact(&mut msg_buf).await?;
     let msg: IpcMessage = serde_json::from_slice(&msg_buf)?;
 
-    tracing::debug!(?msg, "IPC message received (Windows pipe)");
+    tracing::debug!(msg_type = ?std::mem::discriminant(&msg), "IPC message received (Windows pipe)");
 
     let response = daemon.handle_message(msg).await;
 

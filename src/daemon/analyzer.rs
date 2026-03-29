@@ -76,7 +76,9 @@ impl Analyzer {
         }
 
         // Require at least 30 seconds of data to avoid false positives on startup
-        let time_span = data_points.last().unwrap().0 - data_points.first().unwrap().0;
+        let first = data_points.first().expect("len >= 10 guaranteed");
+        let last = data_points.last().expect("len >= 10 guaranteed");
+        let time_span = last.0 - first.0;
         if time_span < 30.0 {
             return None;
         }

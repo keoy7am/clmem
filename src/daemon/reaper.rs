@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::models::{Config, Event, EventKind, ProcessInfo, ProcessState};
@@ -68,9 +69,11 @@ impl Reaper {
         let mut cleaned = 0u32;
         let mut failed = 0u32;
 
+        let proc_map: HashMap<u32, &ProcessInfo> = processes.iter().map(|p| (p.pid, p)).collect();
+
         for &pid in pids {
             // Find the process info
-            let proc_info = processes.iter().find(|p| p.pid == pid);
+            let proc_info = proc_map.get(&pid).copied();
 
             // Safety check: refuse to touch ACTIVE processes without force
             if let Some(info) = proc_info {

@@ -10,11 +10,11 @@ pub use profiler::Profiler;
 pub use reaper::Reaper;
 pub use scanner::Scanner;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use chrono::Utc;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{watch, Mutex as TokioMutex};
 
 use crate::ipc::{default_ipc_path, IpcMessage, IpcResponse};
 use crate::models::{Config, Event, EventKind};
@@ -33,11 +33,11 @@ fn pid_file_path() -> std::path::PathBuf {
 /// The main daemon orchestrating all monitoring subsystems.
 pub struct Daemon {
     config: Config,
-    scanner: Mutex<Scanner>,
-    profiler: Mutex<Profiler>,
+    scanner: Arc<Mutex<Scanner>>,
+    profiler: Arc<Mutex<Profiler>>,
     analyzer: Analyzer,
     reaper: Reaper,
-    event_bus: Mutex<EventBus>,
+    event_bus: TokioMutex<EventBus>,
     start_time: chrono::DateTime<Utc>,
     shutdown_tx: watch::Sender<bool>,
 }
@@ -56,11 +56,11 @@ impl Daemon {
 
         Ok(Self {
             config,
-            scanner: Mutex::new(scanner),
-            profiler: Mutex::new(profiler),
+            scanner: Arc::new(Mutex::new(scanner)),
+            profiler: Arc::new(Mutex::new(profiler)),
             analyzer,
             reaper,
-            event_bus: Mutex::new(event_bus),
+            event_bus: TokioMutex::new(event_bus),
             start_time: Utc::now(),
             shutdown_tx,
         })
@@ -68,25 +68,35 @@ impl Daemon {
 
     /// Execute one scan + profile + optional reap cycle.
     async fn run_scan_cycle(&self) {
-        let scan_events = {
-            let mut scanner = self.scanner.lock().await;
-            scanner.scan()
-        };
+        // Run blocking platform calls (list_claude_processes, take_snapshot) off
+        // the async runtime to avoid starving the tokio worker thread.
+        let scanner = Arc::clone(&self.scanner);
+        let profiler = Arc::clone(&self.profiler);
+        let (scan_events, record_err) = tokio::task::spawn_blocking(move || {
+            let scan_events = {
+                let mut s = scanner.lock().unwrap();
+                s.scan()
+            };
+            let record_err = {
+                let mut p = profiler.lock().unwrap();
+                p.record().err()
+            };
+            (scan_events, record_err)
+        })
+        .await
+        .unwrap_or_else(|_| (Vec::new(), None));
+
+        if let Some(e) = record_err {
+            tracing::error!(error = %e, "Failed to record memory snapshot");
+        }
         if !scan_events.is_empty() {
             let mut bus = self.event_bus.lock().await;
             bus.publish_many(scan_events);
         }
 
-        {
-            let mut profiler = self.profiler.lock().await;
-            if let Err(e) = profiler.record() {
-                tracing::error!(error = %e, "Failed to record memory snapshot");
-            }
-        }
-
         if self.config.auto_cleanup {
             let processes = {
-                let scanner = self.scanner.lock().await;
+                let scanner = self.scanner.lock().unwrap();
                 scanner.get_processes()
             };
             let reap_events = self.reaper.reap_orphans(&processes).await;
@@ -100,11 +110,18 @@ impl Daemon {
     /// Run the leak detection analyzer against the profiler history.
     async fn run_leak_analysis(&self) {
         let history = {
-            let profiler = self.profiler.lock().await;
+            let profiler = self.profiler.lock().unwrap();
             profiler.get_history(60)
         };
 
-        let leak_events = self.analyzer.analyze(&history);
+        // Move CPU-bound linear regression analysis off the async runtime.
+        let analyzer = self.analyzer.clone();
+        let leak_events = tokio::task::spawn_blocking(move || {
+            analyzer.analyze(&history)
+        })
+        .await
+        .unwrap_or_default();
+
         if !leak_events.is_empty() {
             let mut bus = self.event_bus.lock().await;
             bus.publish_many(leak_events);
@@ -117,7 +134,7 @@ impl Daemon {
             IpcMessage::Ping => IpcResponse::Pong,
 
             IpcMessage::GetStatus => {
-                let scanner = self.scanner.lock().await;
+                let scanner = self.scanner.lock().unwrap();
                 let processes = scanner.get_processes();
                 let monitoring_count = processes.len() as u32;
                 let orphan_count = processes
@@ -138,7 +155,7 @@ impl Daemon {
             }
 
             IpcMessage::GetSnapshot => {
-                let profiler = self.profiler.lock().await;
+                let profiler = self.profiler.lock().unwrap();
                 match profiler.get_latest() {
                     Some(snapshot) => IpcResponse::Snapshot(Box::new(snapshot.clone())),
                     None => IpcResponse::Error("No snapshots recorded yet".to_string()),
@@ -146,13 +163,13 @@ impl Daemon {
             }
 
             IpcMessage::GetProcessList => {
-                let scanner = self.scanner.lock().await;
+                let scanner = self.scanner.lock().unwrap();
                 IpcResponse::ProcessList(scanner.get_processes())
             }
 
             IpcMessage::GetHistory { last_n } => {
                 let last_n = last_n.min(3600);
-                let profiler = self.profiler.lock().await;
+                let profiler = self.profiler.lock().unwrap();
                 IpcResponse::History(profiler.get_history(last_n))
             }
 
@@ -164,7 +181,7 @@ impl Daemon {
 
             IpcMessage::Cleanup { pids, force } => {
                 let processes = {
-                    let scanner = self.scanner.lock().await;
+                    let scanner = self.scanner.lock().unwrap();
                     scanner.get_processes()
                 };
                 let (cleaned, failed) = self.reaper.cleanup_pids(&pids, force, &processes).await;

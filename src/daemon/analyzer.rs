@@ -6,6 +6,7 @@ use crate::models::{Config, Event, EventKind, MemorySnapshot};
 ///
 /// Calculates VMS growth rate over a sliding window and emits `MemoryLeak`
 /// events when sustained growth exceeds the configured threshold.
+#[derive(Clone)]
 pub struct Analyzer {
     config: Config,
 }
